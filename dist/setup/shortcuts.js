@@ -37,13 +37,13 @@ function batStart(ccImPath) {
     return `@echo off
 chcp 65001 >nul
 
-:: 启动 cc-im 通道服务
+:: Start cc-im channel service
 start "CC-IM" cmd /c "cd /d "${ccImPath}" && node dist/cli.js channel"
 
-:: 等待服务启动
+:: Wait for service to start
 timeout /t 3 /nobreak >nul
 
-:: 启动 Claude Code 客户端（带通道）
+:: Start Claude Code client with channel
 start "Claude Code" cmd /c "cd /d "${workDir}" && claude --dangerously-load-development-channels server:wechat-work"
 `;
 }
