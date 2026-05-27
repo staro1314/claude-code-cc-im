@@ -1,4 +1,4 @@
-import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform } from 'node:os';
@@ -16,9 +16,24 @@ function getCcImPath() {
 }
 
 /**
+ * 从配置文件获取工作目录
+ */
+function getWorkDir() {
+    const configPath = join(APP_HOME, 'config.json');
+    if (existsSync(configPath)) {
+        try {
+            const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+            return config.claudeWorkDir || join(homedir(), 'project');
+        } catch { /* ignore */ }
+    }
+    return join(homedir(), 'project');
+}
+
+/**
  * 生成 BAT 脚本内容
  */
 function batStart(ccImPath) {
+    const workDir = getWorkDir();
     return `@echo off
 chcp 65001 >nul
 echo Starting CC-IM with Monitor...
@@ -39,7 +54,7 @@ start "CC-IM Log" cmd /c "title CC-IM Log && color 0A && echo Monitoring: %LOG_F
 
 :: Open Claude Code CLI
 echo [3/3] Opening Claude Code CLI...
-start "Claude Code CLI" cmd /c "title Claude Code CLI && color 0B && cd /d "${join(homedir(), 'project')}" && claude"
+start "Claude Code CLI" cmd /c "title Claude Code CLI && color 0B && cd /d "${workDir}" && claude"
 
 echo.
 echo ========================================
@@ -49,7 +64,7 @@ echo.
 echo Windows:
 echo   1. CC-IM Service   - Main service process
 echo   2. CC-IM Log       - Service log monitor
-echo   3. Claude Code CLI - Real Claude Code client
+echo   3. Claude Code CLI - Real Claude Code client (work dir: ${workDir})
 echo.
 echo Send message in WeChat Work to test...
 echo.
