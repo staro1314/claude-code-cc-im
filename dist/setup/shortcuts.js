@@ -30,6 +30,29 @@ function getWorkDir() {
 }
 
 /**
+ * 获取 claudeSkipPermissions 配置值
+ */
+function getSkipPermissions() {
+    const configPath = join(APP_HOME, 'config.json');
+    if (existsSync(configPath)) {
+        try {
+            const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+            return config.claudeSkipPermissions ?? false;
+        } catch { /* ignore */ }
+    }
+    return false;
+}
+
+/**
+ * 生成 Claude Code 启动命令（含环境变量）
+ */
+function claudeChannelCmd(workDir) {
+    const skipPerm = getSkipPermissions();
+    const envLine = skipPerm ? 'set CC_IM_SKIP_PERMISSIONS=1 && ' : '';
+    return `start "Claude Code" cmd /k "cd /d ${workDir} && ${envLine}claude --dangerously-load-development-channels server:wechat-work"`;
+}
+
+/**
  * 生成 BAT 脚本内容
  */
 function batStart(ccImPath) {
@@ -44,7 +67,7 @@ start "CC-IM" cmd /k "cd /d ${ccImPath} && node dist/cli.js channel"
 timeout /t 3 /nobreak >nul
 
 :: Start Claude Code client with channel
-start "Claude Code" cmd /k "cd /d ${workDir} && claude --dangerously-load-development-channels server:wechat-work"
+${claudeChannelCmd(workDir)}
 `;
 }
 
@@ -78,6 +101,7 @@ pause
 }
 
 function batRestart(ccImPath) {
+    const workDir = getWorkDir();
     return `@echo off
 chcp 65001 >nul
 echo Restarting CC-IM...
@@ -105,7 +129,7 @@ timeout /t 2 /nobreak >nul
 echo Starting CC-IM in channel mode...
 start "CC-IM" cmd /k "cd /d ${ccImPath} && node dist/cli.js channel"
 timeout /t 3 /nobreak >nul
-start "Claude Code" cmd /k "cd /d ${workDir} && claude --dangerously-load-development-channels server:wechat-work"
+${claudeChannelCmd(workDir)}
 
 echo CC-IM restarted in channel mode.
 echo.

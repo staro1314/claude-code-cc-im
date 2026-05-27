@@ -405,13 +405,18 @@ export async function runSetup() {
                 stdio: 'inherit',
                 detached: true,
             }).unref();
-            // 启动 Claude Code 客户端
+            // 启动 Claude Code 客户端（传递 skip permissions 环境变量）
             setTimeout(() => {
                 info('正在启动 Claude Code 客户端...');
+                const claudeEnv = { ...process.env };
+                if (config.claudeSkipPermissions) {
+                    claudeEnv.CC_IM_SKIP_PERMISSIONS = '1';
+                }
                 spawn('claude', ['--dangerously-load-development-channels', 'server:wechat-work'], {
                     stdio: 'inherit',
                     detached: true,
                     cwd: claudeWorkDir,
+                    env: claudeEnv,
                 }).unref();
             }, 3000);
         } else {
