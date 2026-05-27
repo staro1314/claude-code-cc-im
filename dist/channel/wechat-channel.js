@@ -22,12 +22,18 @@ import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { registerChannel, unregisterChannel } from './channel-registry.js';
 
 // --- Configuration ---
-const CHANNEL_PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '0', 10) || 18789;
+// Use port 0 to let OS assign random available port (supports multiple instances)
+const CHANNEL_PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '0', 10) || 0;
 const BRIDGE_PORT = parseInt(process.env.CC_IM_BRIDGE_PORT || '0', 10) || 18790;
 const APP_HOME = join(homedir(), '.cc-im');
+
+// Generate unique client ID for this instance
+const CLIENT_ID = `claude-${randomBytes(4).toString('hex')}`;
 
 // --- State ---
 /** @type {Map<string, {resolve: (decision: string) => void, timer: NodeJS.Timeout}>} */
@@ -279,10 +285,17 @@ function log(msg) {
 // --- Main ---
 async function main() {
   log('Starting WeChat Work Channel MCP Server...');
+  log(`Client ID: ${CLIENT_ID}`);
 
   // Start HTTP server for receiving messages from cc-im
   const httpServer = await startHttpServer(CHANNEL_PORT);
   log(`Channel HTTP port: ${httpServer.port}`);
+
+  // Register with channel registry
+  const registered = registerChannel(CLIENT_ID, httpServer.port);
+  if (!registered) {
+    log('Warning: Port already in use by another channel instance');
+  }
 
   // Connect MCP server to Claude Code over stdio
   const transport = new StdioServerTransport();
@@ -292,11 +305,13 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     log('Shutting down...');
+    unregisterChannel(CLIENT_ID);
     await httpServer.close();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('exit', () => unregisterChannel(CLIENT_ID));
 }
 
 main().catch((err) => {

@@ -18,6 +18,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createLogger } from '../logger.js';
 import { APP_HOME } from '../constants.js';
+import { getDefaultChannelPort, getAllChannels, cleanupRegistry } from './channel-registry.js';
 
 const log = createLogger('Bridge');
 
@@ -164,15 +165,26 @@ export async function forwardToChannel(channelPort, message) {
 }
 
 /**
- * Read the channel server port from the port file.
- * Returns null if the file doesn't exist.
+ * Read the channel server port from the registry.
+ * Returns null if no channels are registered.
  */
 export function getChannelPort() {
-  const portFile = join(APP_HOME, 'channel-port');
-  try {
-    if (existsSync(portFile)) {
-      return parseInt(readFileSync(portFile, 'utf-8').trim(), 10) || null;
-    }
-  } catch { /* ignore */ }
-  return null;
+  // Clean up stale entries first
+  cleanupRegistry();
+
+  // Get default (first) channel port
+  return getDefaultChannelPort();
+}
+
+/**
+ * Get all registered channel ports.
+ * Returns array of { clientId, port } objects.
+ */
+export function getAllChannelPorts() {
+  cleanupRegistry();
+  const channels = getAllChannels();
+  return Object.entries(channels).map(([clientId, info]) => ({
+    clientId,
+    port: info.port,
+  }));
 }
