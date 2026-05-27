@@ -38,13 +38,13 @@ function batStart(ccImPath) {
 chcp 65001 >nul
 
 :: Start cc-im channel service
-start "CC-IM" cmd /c "cd /d "${ccImPath}" && node dist/cli.js channel"
+start "CC-IM" cmd /k "cd /d ${ccImPath} && node dist/cli.js channel"
 
 :: Wait for service to start
 timeout /t 3 /nobreak >nul
 
 :: Start Claude Code client with channel
-start "Claude Code" cmd /c "cd /d "${workDir}" && claude --dangerously-load-development-channels server:wechat-work"
+start "Claude Code" cmd /k "cd /d ${workDir} && claude --dangerously-load-development-channels server:wechat-work"
 `;
 }
 
@@ -103,9 +103,9 @@ del "%USERPROFILE%\\.cc-im\\bridge-port" 2>nul
 timeout /t 2 /nobreak >nul
 
 echo Starting CC-IM in channel mode...
-start "CC-IM" cmd /c "cd /d "${ccImPath}" && node dist/cli.js channel"
+start "CC-IM" cmd /k "cd /d ${ccImPath} && node dist/cli.js channel"
 timeout /t 3 /nobreak >nul
-start "Claude Code" cmd /c "cd /d "${workDir}" && claude --dangerously-load-development-channels server:wechat-work"
+start "Claude Code" cmd /k "cd /d ${workDir} && claude --dangerously-load-development-channels server:wechat-work"
 
 echo CC-IM restarted in channel mode.
 echo.
@@ -116,7 +116,7 @@ pause
 function batStatus(ccImPath) {
     return `@echo off
 chcp 65001 >nul
-cd /d "${ccImPath}"
+cd /d ${ccImPath}
 node dist/cli.js status
 echo.
 pause
