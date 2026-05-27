@@ -7,6 +7,7 @@ import { generateShortcuts } from './shortcuts.js';
 import { input, confirm, multiSelect, closePrompts, separator, success, error, info } from './prompts.js';
 
 const CONFIG_PATH = join(APP_HOME, 'config.json');
+const CLAUDE_JSON_PATH = join(homedir(), '.claude.json');
 
 /**
  * 打印欢迎横幅
@@ -144,6 +145,54 @@ async function setupTelegram(existing) {
 }
 
 /**
+ * 注册 wechat-work MCP server 到 ~/.claude.json
+ * 使 claude --dangerously-load-development-channels server:wechat-work 能找到 MCP server
+ */
+function registerMcpServer() {
+    let claudeJson = {};
+    try {
+        if (existsSync(CLAUDE_JSON_PATH)) {
+            claudeJson = JSON.parse(readFileSync(CLAUDE_JSON_PATH, 'utf-8'));
+        }
+    } catch { /* ignore */ }
+
+    if (!claudeJson.mcpServers) claudeJson.mcpServers = {};
+
+    // 已注册则跳过
+    if (claudeJson.mcpServers['wechat-work']) {
+        info('wechat-work MCP server 已注册');
+        return true;
+    }
+
+    // 获取 wechat-channel.js 的绝对路径
+    const thisFile = new URL(import.meta.url).pathname;
+    // dist/setup/wizard.js → dist/setup → dist → cc-im/
+    const ccImRoot = join(import.meta.dirname, '..', '..');
+    const channelScript = join(ccImRoot, 'dist', 'channel', 'wechat-channel.js');
+
+    if (!existsSync(channelScript)) {
+        error(`wechat-channel.js 未找到: ${channelScript}`);
+        return false;
+    }
+
+    claudeJson.mcpServers['wechat-work'] = {
+        type: 'stdio',
+        command: 'node',
+        args: [channelScript],
+        env: {},
+    };
+
+    try {
+        writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(claudeJson, null, 2) + '\n', 'utf-8');
+        success('已注册 wechat-work MCP server 到 ~/.claude.json');
+        return true;
+    } catch (e) {
+        error(`注册 MCP server 失败: ${e.message}`);
+        return false;
+    }
+}
+
+/**
  * 步骤 5: 高级选项
  */
 async function setupAdvanced(existing) {
@@ -200,7 +249,7 @@ async function reviewConfig(config) {
     console.log(`  跳过权限:    ${config.claudeSkipPermissions ? '是' : '否'}`);
     console.log(`  超时:        ${config.claudeTimeoutMs}ms`);
     if (config.proxyUrl) console.log(`  代理:        ${config.proxyUrl}`);
-    if (config.wecomBotId) console.log(`  企业微信:    已配置`);
+    if (config.wecomBotId) console.log(`  企业微信:    已配置${config.useChannel ? ' (Channel 模式)' : ''}`);
     if (config.feishuAppId) console.log(`  飞书:        已配置`);
     if (config.telegramBotToken) console.log(`  Telegram:    已配置`);
     if (config.allowedUserIds?.length > 0) {
@@ -263,6 +312,17 @@ export async function runSetup() {
     // 步骤 6: 用户访问控制
     const accessConfig = await setupAllowedUsers(existing);
 
+    // 步骤 7: Channel 模式（企业微信专用）
+    console.log('[7/10] Channel 模式\n');
+    info('Channel 模式让企业微信消息直接注入 Claude Code CLI 终端');
+    info('推荐 Windows 用户使用，体验最佳');
+    console.log('');
+    const useChannel = await confirm(
+        '启用 Channel 模式? (企业微信推荐)',
+        selectedPlatforms.some(p => p.includes('企业微信'))
+    );
+    console.log('');
+
     // 合并配置（保留已有配置中未修改的字段）
     const config = {
         ...(existing || {}),
@@ -271,10 +331,12 @@ export async function runSetup() {
         ...accessConfig,
         claudeCliPath,
         claudeWorkDir,
+        useChannel,
         allowedBaseDirs: existing?.allowedBaseDirs || [claudeWorkDir],
     };
 
-    // 步骤 7: 预览确认
+    // 步骤 8: 预览确认
+    console.log('[8/10] 配置预览\n');
     const confirmed = await reviewConfig(config);
     if (!confirmed) {
         info('已取消');
@@ -282,7 +344,7 @@ export async function runSetup() {
         return;
     }
 
-    // 步骤 8: 写入配置
+    // 步骤 9: 写入配置
     console.log('[9/10] 保存配置...\n');
     try {
         if (existsSync(CONFIG_PATH)) {
@@ -301,7 +363,7 @@ export async function runSetup() {
         process.exit(1);
     }
 
-    // 步骤 9: 生成快捷脚本
+    // 步骤 10: 生成快捷脚本 + 注册 MCP server
     console.log('\n[10/10] 生成快捷脚本...\n');
     try {
         const { generated, total, dir } = generateShortcuts();
@@ -310,26 +372,57 @@ export async function runSetup() {
         error(`生成脚本失败: ${e.message}`);
     }
 
+    // 注册 wechat-work MCP server（Channel 模式必须）
+    if (useChannel && selectedPlatforms.some(p => p.includes('企业微信'))) {
+        console.log('');
+        registerMcpServer();
+    }
+
     console.log('');
     separator();
     console.log('');
     success('配置完成!');
     console.log('');
-    info('启动服务: 双击 ~/.cc-im/启动.bat 或运行 cc-im start');
-    info('监控模式: 双击 ~/.cc-im/监控模式.bat');
+    if (useChannel) {
+        info('启动服务: 双击 ~/.cc-im/启动.bat');
+        info('停止服务: 双击 ~/.cc-im/停止.bat');
+        info('重启服务: 双击 ~/.cc-im/重启.bat');
+    } else {
+        info('启动服务: 运行 cc-im 或 cc-im -d (后台)');
+        info('停止服务: cc-im stop');
+    }
     console.log('');
 
     // 询问是否立即启动
     const startNow = await confirm('现在启动服务?', false);
     if (startNow) {
         console.log('');
-        info('正在启动 cc-im 服务...');
-        const { spawn } = await import('node:child_process');
-        const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'cli.js'), 'start'], {
-            stdio: 'inherit',
-            detached: true,
-        });
-        child.unref();
+        if (useChannel) {
+            info('正在启动 Channel 模式...');
+            const { spawn } = await import('node:child_process');
+            const ccImPath = join(import.meta.dirname, '..', '..');
+            spawn(process.execPath, [join(ccImPath, 'dist', 'cli.js'), 'channel'], {
+                stdio: 'inherit',
+                detached: true,
+            }).unref();
+            // 启动 Claude Code 客户端
+            setTimeout(() => {
+                info('正在启动 Claude Code 客户端...');
+                spawn('claude', ['--dangerously-load-development-channels', 'server:wechat-work'], {
+                    stdio: 'inherit',
+                    detached: true,
+                    cwd: claudeWorkDir,
+                }).unref();
+            }, 3000);
+        } else {
+            info('正在启动 cc-im 服务...');
+            const { spawn } = await import('node:child_process');
+            const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'cli.js'), 'start'], {
+                stdio: 'inherit',
+                detached: true,
+            });
+            child.unref();
+        }
     }
 
     closePrompts();
