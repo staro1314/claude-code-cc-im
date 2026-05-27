@@ -37,9 +37,9 @@ set "TODAY=%date:~0,4%-%date:~5,2%-%date:~8,2%"
 set "LOG_FILE=${join(homedir(), '.cc-im', 'logs')}\\%TODAY%.log"
 start "CC-IM Log" cmd /c "title CC-IM Log && color 0A && echo Monitoring: %LOG_FILE% && echo. && powershell -Command "Get-Content -Path '%LOG_FILE%' -Wait -Tail 50""
 
-:: Open Claude Monitor
-echo [3/3] Opening Claude Code Monitor...
-start "Claude Code Monitor" cmd /c "title Claude Code Monitor && color 0B && node "${join(homedir(), '.cc-im', 'claude-monitor.js')}"
+:: Open Claude Code CLI
+echo [3/3] Opening Claude Code CLI...
+start "Claude Code CLI" cmd /c "title Claude Code CLI && color 0B && cd /d "${join(homedir(), 'project')}" && claude"
 
 echo.
 echo ========================================
@@ -47,9 +47,9 @@ echo   All windows opened
 echo ========================================
 echo.
 echo Windows:
-echo   1. CC-IM Service      - Main service process
-echo   2. CC-IM Log          - Service log monitor
-echo   3. Claude Code Monitor - Real-time Claude output
+echo   1. CC-IM Service   - Main service process
+echo   2. CC-IM Log       - Service log monitor
+echo   3. Claude Code CLI - Real Claude Code client
 echo.
 echo Send message in WeChat Work to test...
 echo.
