@@ -36,25 +36,29 @@ function batStart(ccImPath) {
     const workDir = getWorkDir();
     return `@echo off
 chcp 65001 >nul
-echo Starting CC-IM with Monitor...
+echo Starting CC-IM...
 echo.
 
 :: Start cc-im service (background)
-echo [1/3] Starting cc-im service...
+echo [1/4] Starting cc-im service...
 start "CC-IM Service" cmd /c "cd /d "${ccImPath}" && node dist/cli.js start"
 
 :: Wait for service to start
 timeout /t 3 /nobreak >nul
 
 :: Open cc-im log monitor
-echo [2/3] Opening cc-im log monitor...
+echo [2/4] Opening cc-im log monitor...
 set "TODAY=%date:~0,4%-%date:~5,2%-%date:~8,2%"
 set "LOG_FILE=${join(homedir(), '.cc-im', 'logs')}\\%TODAY%.log"
 start "CC-IM Log" cmd /c "title CC-IM Log && color 0A && echo Monitoring: %LOG_FILE% && echo. && powershell -Command "Get-Content -Path '%LOG_FILE%' -Wait -Tail 50""
 
-:: Open Claude Code CLI
-echo [3/3] Opening Claude Code CLI...
+:: Open Claude Code CLI (for interactive use)
+echo [3/4] Opening Claude Code CLI...
 start "Claude Code CLI" cmd /c "title Claude Code CLI && color 0B && cd /d "${workDir}" && claude"
+
+:: Open Claude Code Monitor (shows cc-im's Claude activity)
+echo [4/4] Opening Claude Code Monitor...
+start "Claude Code Monitor" cmd /c "title Claude Code Monitor && color 0D && node "${join(homedir(), '.cc-im', 'claude-monitor.js')}"
 
 echo.
 echo ========================================
@@ -62,11 +66,12 @@ echo   All windows opened
 echo ========================================
 echo.
 echo Windows:
-echo   1. CC-IM Service   - Main service process
-echo   2. CC-IM Log       - Service log monitor
-echo   3. Claude Code CLI - Real Claude Code client (work dir: ${workDir})
+echo   1. CC-IM Service      - Main service process
+echo   2. CC-IM Log          - Service log monitor
+echo   3. Claude Code CLI    - Interactive Claude (work dir: ${workDir})
+echo   4. Claude Code Monitor - Real-time cc-im Claude activity
 echo.
-echo Send message in WeChat Work to test...
+echo Send message in WeChat Work to see it in Monitor window...
 echo.
 pause
 `;
