@@ -11,7 +11,8 @@ const isWin = platform() === 'win32';
  */
 function getCcImPath() {
     const thisFile = fileURLToPath(import.meta.url);
-    return join(dirname(dirname(thisFile)));
+    // dist/setup/shortcuts.js → dist/setup → dist → cc-im/
+    return join(dirname(dirname(dirname(thisFile))));
 }
 
 /**
