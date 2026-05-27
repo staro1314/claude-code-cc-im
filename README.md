@@ -1,8 +1,21 @@
-# cc-im
+# CC-IM
 
-多平台（飞书 & Telegram & 企业微信）机器人 ↔ Claude Code CLI 桥接服务。
+> 企业微信 / 飞书 / Telegram 遥控 Claude Code CLI 的多平台桥接服务
 
-用户在飞书、Telegram 或企业微信中发消息，服务器接收后调用 Claude Code 执行，并将输出实时流式推送回聊天窗口。
+CC-IM 让你通过手机上的企业微信、飞书或 Telegram 远程操控 Claude Code CLI。在外用手机发消息，在家用电脑直接操作——同一个 Claude 实例，随时随地访问。
+
+```
+手机企业微信/飞书/Telegram  →  CC-IM 服务  →  Claude Code CLI  →  你的电脑/服务器
+```
+
+## 使用场景
+
+| 场景 | 说明 |
+|------|------|
+| **远程办公** | 在家用电脑跑 Claude Code，外出时用手机企业微信远程操控 |
+| **团队协作** | 多人共享一个 Claude 实例，各自独立会话 |
+| **服务器部署** | 在云服务器上运行，随时随地访问 |
+| **权限管控** | 通过白名单控制谁能使用，支持逐条审批敏感操作 |
 
 ## 功能
 
@@ -28,7 +41,61 @@
 - **版本更新检查**：启动时自动检查 npm 最新版本，有更新时提示
 - **日志等级配置**：支持 DEBUG/INFO/WARN/ERROR 四级日志
 
+## 安装
+
+### 前置要求
+
+- **Node.js >= 20**（[下载](https://nodejs.org/)）
+- **Claude Code CLI**（[安装指南](https://docs.anthropic.com/en/docs/claude-code)）
+
+### 方式一：npm 全局安装（推荐）
+
+```bash
+npm install -g cc-im
+```
+
+### 方式二：从 GitHub 安装
+
+```bash
+npm install -g github:your-username/cc-im
+```
+
+### 方式三：下载 tgz 包离线安装
+
+1. 从 Releases 下载 `cc-im-x.x.x.tgz`
+2. 本地安装：
+
+```bash
+npm install -g cc-im-x.x.x.tgz
+```
+
+### 方式四：从源码构建
+
+```bash
+git clone https://github.com/your-username/cc-im.git
+cd cc-im
+npm install
+npm run build
+npm link
+```
+
 ## 快速开始
+
+### 一键配置向导
+
+安装后运行向导，逐步引导完成所有配置：
+
+```bash
+cc-im setup
+```
+
+向导会自动检测环境、Claude CLI 路径，引导你选择平台、填写凭证，最后生成配置文件和快捷脚本。
+
+### 手动配置
+
+> 要求：Node.js >= 20，需要预先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+
+#### 同时运行多个平台
 
 > 要求：Node.js >= 20，需要预先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 
@@ -128,6 +195,21 @@ cc-im status
 ```
 
 日志输出到 `~/.cc-im/logs/daemon.log`。
+
+### Windows 快捷脚本
+
+运行 `cc-im setup` 后会自动生成快捷脚本到 `~/.cc-im/`：
+
+| 脚本 | 说明 |
+|------|------|
+| `启动.bat` | 启动服务（前台） |
+| `停止.bat` | 停止服务 |
+| `重启.bat` | 重启服务 |
+| `状态.bat` | 查看运行状态 |
+| `启动.ps1` | PowerShell 启动 |
+| `停止.ps1` | PowerShell 停止 |
+
+双击即可运行，无需打开终端。
 
 ### 开机自启（systemd）
 
@@ -330,6 +412,44 @@ src/
 │   └── session-manager.ts    # 会话管理（持久化到 data/sessions.json）
 └── queue/
     └── request-queue.ts      # 请求队列与并发控制
+```
+
+## 常见问题
+
+### Q: 提示 "Claude Code CLI 未找到"？
+
+确保已安装 Claude Code CLI 且在 PATH 中：
+
+```bash
+# 检查是否安装
+claude --version
+
+# 如果未安装
+npm install -g @anthropic-ai/claude-code
+```
+
+### Q: 企业微信群聊中机器人不响应？
+
+群聊中需要 @机器人才会响应。确保机器人已正确配置 Bot ID 和 Secret。
+
+### Q: 权限确认卡片一直弹出？
+
+检查 `~/.claude/settings.json` 中的 hooks 配置是否正确。运行 `cc-im setup` 可自动配置。
+
+### Q: 如何更新到最新版本？
+
+```bash
+npm update -g cc-im
+```
+
+### Q: 如何查看日志？
+
+```bash
+# 日志目录
+ls ~/.cc-im/logs/
+
+# 实时查看
+tail -f ~/.cc-im/logs/$(date +%Y-%m-%d).log
 ```
 
 ## License
