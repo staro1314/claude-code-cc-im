@@ -1,0 +1,123 @@
+/**
+ * Channel Mode Entry Point
+ *
+ * Starts cc-im in channel mode: the bridge server receives messages from
+ * the WeChat Work channel MCP server and forwards them to WeChat Work.
+ *
+ * This is the "service side" of the channel architecture:
+ *   1. Start bridge server (receives replies from channel server)
+ *   2. Connect to WeChat Work WebSocket
+ *   3. Register channel-mode message handler
+ *   4. Wait for messages → forward to channel server
+ *
+ * The "Claude side" is started separately:
+ *   claude --dangerously-load-development-channels server:wechat-work
+ */
+import { loadConfig } from '../config.js';
+import { initWecom, stopWecom } from '../wecom/client.js';
+import { setupWecomChannelHandlers } from './wecom-channel-handler.js';
+import { startBridgeServer } from './bridge-server.js';
+import { startPermissionServer } from '../hook/permission-server.js';
+import { ensureHookConfigured } from '../hook/ensure-hook.js';
+import { initLogger, createLogger, closeLogger } from '../logger.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { version: APP_VERSION } = require('../../package.json');
+const log = createLogger('Channel');
+
+export async function runChannel() {
+    process.on('unhandledRejection', (reason) => {
+        log.error('Unhandled rejection:', reason);
+    });
+    process.on('uncaughtException', (err) => {
+        log.error('Uncaught exception:', err);
+        process.exit(1);
+    });
+
+    const config = loadConfig();
+    initLogger(config.logDir, config.logLevel);
+
+    log.info('Starting cc-im in CHANNEL mode...');
+    log.info('This mode bridges WeChat Work messages into a Claude Code session.');
+    log.info('');
+    log.info('To use this mode:');
+    log.info('  1. This service (cc-im channel) handles WeChat Work messages');
+    log.info('  2. Start Claude Code with: claude --dangerously-load-development-channels server:wechat-work');
+    log.info('  3. WeChat Work messages will appear in the Claude Code terminal');
+    log.info('');
+
+    // Ensure hooks are configured
+    ensureHookConfigured();
+
+    // Start permission server (needed for hook callbacks)
+    const permissionServer = await startPermissionServer(config.hookPort);
+    log.info(`Hook server started on port ${permissionServer.port}`);
+
+    // Start bridge server (for channel ↔ WeChat Work communication)
+    const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT || '0', 10) || 18790;
+    const bridgeServer = await startBridgeServer({
+        port: bridgePort,
+        sendTextReply: async (chatId, text) => {
+            // Dynamically import to avoid circular deps
+            const { sendTextReply } = await import('../wecom/message-sender.js');
+            await sendTextReply(chatId, text);
+        },
+        sendPermissionCard: async (chatId, requestId, toolName, toolInput) => {
+            // Permission card sending is handled by the channel handler
+            log.debug(`Permission card request: ${toolName} (${requestId})`);
+        },
+        resolvePermission: (requestId, decision) => {
+            const { resolvePermissionById } = require('../hook/permission-server.js');
+            resolvePermissionById(requestId, decision);
+        },
+    });
+    log.info(`Bridge server started on port ${bridgeServer.port}`);
+
+    // Write bridge port for other modules
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+    const appHome = join(homedir(), '.cc-im');
+    mkdirSync(appHome, { recursive: true });
+    writeFileSync(join(appHome, 'bridge-port'), String(bridgeServer.port), 'utf-8');
+
+    // Initialize WeChat Work in channel mode
+    let wecomHandle = null;
+    try {
+        await initWecom(config, (wsClient) => {
+            wecomHandle = setupWecomChannelHandlers(wsClient, config, null, {});
+            return wecomHandle;
+        });
+        log.info('WeChat Work bot initialized (channel mode)');
+    } catch (err) {
+        log.error('Failed to initialize WeChat Work bot:', err);
+        process.exit(1);
+    }
+
+    log.info('');
+    log.info('Channel service is running!');
+    log.info('');
+    log.info('Now start Claude Code in another terminal:');
+    log.info(`  claude --dangerously-load-development-channels server:wechat-work`);
+    log.info('');
+    log.info('Send a message in WeChat Work to see it in Claude Code.');
+    log.info('Press Ctrl+C to stop.');
+
+    // Graceful shutdown
+    let shuttingDown = false;
+    const shutdown = async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        log.info('Shutting down channel service...');
+        wecomHandle?.stop();
+        stopWecom();
+        await bridgeServer.close();
+        await permissionServer.close();
+        closeLogger();
+        process.exit(0);
+    };
+    const onSignal = () => { shutdown().catch(() => process.exit(1)); };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
+}

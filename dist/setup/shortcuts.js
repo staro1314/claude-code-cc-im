@@ -36,42 +36,37 @@ function batStart(ccImPath) {
     const workDir = getWorkDir();
     return `@echo off
 chcp 65001 >nul
-echo Starting CC-IM...
+echo Starting CC-IM (Channel Mode)...
 echo.
 
-:: Start cc-im service (background)
-echo [1/4] Starting cc-im service...
-start "CC-IM Service" cmd /c "cd /d "${ccImPath}" && node dist/cli.js start"
+:: Start cc-im channel service (background)
+echo [1/3] Starting cc-im channel service...
+start "CC-IM Channel" cmd /c "cd /d "${ccImPath}" && node dist/cli.js channel"
 
 :: Wait for service to start
 timeout /t 3 /nobreak >nul
 
+:: Open Claude Code with WeChat Work channel
+echo [2/3] Opening Claude Code with WeChat Work channel...
+start "Claude Code + WeChat" cmd /c "title Claude Code + WeChat Work && color 0B && cd /d "${workDir}" && claude --dangerously-load-development-channels server:wechat-work"
+
 :: Open cc-im log monitor
-echo [2/4] Opening cc-im log monitor...
+echo [3/3] Opening cc-im log monitor...
 set "TODAY=%date:~0,4%-%date:~5,2%-%date:~8,2%"
 set "LOG_FILE=${join(homedir(), '.cc-im', 'logs')}\\%TODAY%.log"
 start "CC-IM Log" cmd /c "title CC-IM Log && color 0A && echo Monitoring: %LOG_FILE% && echo. && powershell -Command "Get-Content -Path '%LOG_FILE%' -Wait -Tail 50""
 
-:: Open Claude Code CLI (for interactive use)
-echo [3/4] Opening Claude Code CLI...
-start "Claude Code CLI" cmd /c "title Claude Code CLI && color 0B && cd /d "${workDir}" && claude"
-
-:: Open Claude Code Monitor (shows cc-im's Claude activity)
-echo [4/4] Opening Claude Code Monitor...
-start "Claude Code Monitor" cmd /c "title Claude Code Monitor && color 0D && node "${join(homedir(), '.cc-im', 'claude-monitor.js')}"
-
 echo.
 echo ========================================
-echo   All windows opened
+echo   All windows opened (Channel Mode)
 echo ========================================
 echo.
 echo Windows:
-echo   1. CC-IM Service      - Main service process
-echo   2. CC-IM Log          - Service log monitor
-echo   3. Claude Code CLI    - Interactive Claude (work dir: ${workDir})
-echo   4. Claude Code Monitor - Real-time cc-im Claude activity
+echo   1. CC-IM Channel      - Bridge service (WeChat Work <--> Claude)
+echo   2. Claude Code + WeChat - Claude with WeChat Work channel enabled
+echo   3. CC-IM Log          - Service log monitor
 echo.
-echo Send message in WeChat Work to see it in Monitor window...
+echo WeChat Work messages will appear in the Claude Code window!
 echo.
 pause
 `;

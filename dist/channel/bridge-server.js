@@ -1,0 +1,178 @@
+/**
+ * Channel Bridge Server
+ *
+ * Runs inside the cc-im service process. Bridges between the WeChat Work
+ * channel MCP server and the existing WeChat Work message sender.
+ *
+ * Responsibilities:
+ * - Receives replies from the channel server and forwards to WeChat Work
+ * - Receives permission relay requests and shows them in WeChat Work
+ * - Forwards permission decisions back to the channel server
+ * - Tracks active chat sessions for the channel
+ *
+ * Port: reads CC_IM_BRIDGE_PORT from config or uses default 18790
+ */
+import { createServer } from 'node:http';
+import { join } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { createLogger } from '../logger.js';
+import { APP_HOME } from '../constants.js';
+
+const log = createLogger('Bridge');
+
+/**
+ * Create and start the bridge server.
+ *
+ * @param {object} options
+ * @param {number} options.port - Port to listen on
+ * @param {Function} options.sendTextReply - async (chatId, text) => void
+ * @param {Function} options.sendPermissionCard - async (chatId, requestId, toolName, toolInput) => void
+ * @param {Function} options.resolvePermission - (requestId, decision) => void
+ * @returns {Promise<{port: number, close: () => Promise<void>}>}
+ */
+export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission }) {
+  return new Promise((resolve, reject) => {
+    const server = createServer(async (req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      // Claude's reply → forward to WeChat Work
+      if (req.method === 'POST' && req.url === '/reply') {
+        try {
+          const body = await readBody(req);
+          const { chat_id, text } = body;
+          if (!chat_id || !text) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'chat_id and text required' }));
+            return;
+          }
+          log.debug(`Channel reply → chat_id=${chat_id}, len=${text.length}`);
+          await sendTextReply(chat_id, text);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          log.error('Bridge reply error:', err);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Permission relay → show permission card in WeChat Work
+      if (req.method === 'POST' && req.url === '/permission-relay') {
+        try {
+          const body = await readBody(req);
+          const { request_id, tool_name, description, input_preview } = body;
+          log.info(`Permission relay: ${tool_name} (${request_id})`);
+          // Send permission card to the most recent active chat
+          // The channel server should include chat_id in meta
+          // For now, use a generic approach
+          await sendPermissionCard(body.chat_id || '', request_id, tool_name, {});
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          log.error('Bridge permission-relay error:', err);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Permission decision → forward to channel server
+      if (req.method === 'POST' && req.url === '/permission-decision') {
+        try {
+          const body = await readBody(req);
+          const { request_id, decision } = body;
+          log.info(`Permission decision: ${request_id} → ${decision}`);
+          resolvePermission(request_id, decision);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          log.error('Bridge permission-decision error:', err);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Health check
+      if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: 'ok', server: 'bridge' }));
+        return;
+      }
+
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Not found' }));
+    });
+
+    server.on('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      const addr = server.address();
+      const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+      log.info(`Bridge server listening on 127.0.0.1:${actualPort}`);
+      resolve({ port: actualPort, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk.toString(); });
+    req.on('end', () => {
+      try { resolve(JSON.parse(body)); }
+      catch { reject(new Error('Invalid JSON')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Forward a WeChat Work message to the channel server.
+ *
+ * @param {number} channelPort - Port the channel server is listening on
+ * @param {object} message
+ * @param {string} message.content - Message text
+ * @param {string} message.chat_id - Chat ID
+ * @param {string} message.user_id - User ID
+ * @param {string} message.platform - Platform name (wecom)
+ * @param {string} message.msg_id - Message ID for dedup
+ */
+export async function forwardToChannel(channelPort, message) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${channelPort}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message),
+    });
+    if (!res.ok) {
+      log.warn(`Channel forward failed: ${res.status} ${res.statusText}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    log.warn(`Channel forward error: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Read the channel server port from the port file.
+ * Returns null if the file doesn't exist.
+ */
+export function getChannelPort() {
+  const portFile = join(APP_HOME, 'channel-port');
+  try {
+    if (existsSync(portFile)) {
+      return parseInt(readFileSync(portFile, 'utf-8').trim(), 10) || null;
+    }
+  } catch { /* ignore */ }
+  return null;
+}

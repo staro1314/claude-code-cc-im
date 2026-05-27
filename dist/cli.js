@@ -220,7 +220,7 @@ function parseArgs() {
     let command = 'start';
     let daemon = false;
     for (const arg of args) {
-        if (arg === 'stop' || arg === 'install' || arg === 'uninstall' || arg === 'status' || arg === 'setup') {
+        if (arg === 'stop' || arg === 'install' || arg === 'uninstall' || arg === 'status' || arg === 'setup' || arg === 'channel') {
             command = arg;
         }
         else if (arg === '-d' || arg === '--daemon') {
@@ -268,6 +268,10 @@ else if (command === 'uninstall') {
 else if (command === 'setup') {
     const { runSetup } = await import('./setup/wizard.js');
     await runSetup();
+}
+else if (command === 'channel') {
+    const { runChannel } = await import('./channel/index.js');
+    await runChannel();
 }
 else if (daemon) {
     startDaemon();
