@@ -1,0 +1,193 @@
+import { MAX_STREAMING_CONTENT_LENGTH, MAX_CARD_CONTENT_LENGTH } from '../constants.js';
+import { splitLongContent as sharedSplitLongContent, truncateText, buildInputSummary } from '../shared/utils.js';
+const HEADER_TEMPLATES = {
+    processing: 'blue',
+    thinking: 'blue',
+    streaming: 'blue',
+    done: 'green',
+    error: 'red',
+};
+const HEADER_TITLES = {
+    processing: '⏳ Claude Code - 加载中...',
+    thinking: '🧠 Claude Code - 思考中...',
+    streaming: '💬 Claude Code - 回复中...',
+    done: '✅ Claude Code - 完成',
+    error: '❌ Claude Code - 错误',
+};
+export function truncateForCard(text) {
+    return truncateText(text, MAX_CARD_CONTENT_LENGTH);
+}
+export function buildCardObject(options, messageId) {
+    const { content, status, note } = options;
+    const elements = [
+        {
+            tag: 'markdown',
+            content: truncateForCard(content) || '...',
+        },
+    ];
+    if (note) {
+        elements.push({
+            tag: 'note',
+            elements: [{ tag: 'plain_text', content: note }],
+        });
+    }
+    // 在处理中、思考中和流式输出状态时添加停止按钮
+    if ((status === 'processing' || status === 'thinking' || status === 'streaming') && messageId) {
+        elements.push({
+            tag: 'action',
+            actions: [
+                {
+                    tag: 'button',
+                    text: {
+                        tag: 'plain_text',
+                        content: '⏹️ 停止',
+                    },
+                    type: 'danger',
+                    value: { action: 'stop', message_id: messageId },
+                },
+            ],
+        });
+    }
+    return {
+        config: { wide_screen_mode: true, update_multi: true },
+        header: {
+            template: HEADER_TEMPLATES[status],
+            title: {
+                tag: 'plain_text',
+                content: HEADER_TITLES[status],
+            },
+        },
+        elements,
+    };
+}
+export function buildCard(options, messageId) {
+    return JSON.stringify(buildCardObject(options, messageId));
+}
+export function splitLongContent(text, maxLen = MAX_CARD_CONTENT_LENGTH) {
+    return sharedSplitLongContent(text, maxLen);
+}
+export function buildPermissionCard(requestId, toolName, toolInput) {
+    const inputSummary = buildInputSummary(toolName, toolInput);
+    const card = {
+        config: { wide_screen_mode: true, update_multi: true },
+        header: {
+            template: 'orange',
+            title: { tag: 'plain_text', content: `🔐 权限确认 - ${toolName}` },
+        },
+        elements: [
+            { tag: 'markdown', content: truncateForCard(inputSummary) },
+            {
+                tag: 'action',
+                actions: [
+                    {
+                        tag: 'button',
+                        text: { tag: 'plain_text', content: '✅ 允许' },
+                        type: 'primary',
+                        value: JSON.stringify({ action: 'allow', requestId }),
+                    },
+                    {
+                        tag: 'button',
+                        text: { tag: 'plain_text', content: '❌ 拒绝' },
+                        type: 'danger',
+                        value: JSON.stringify({ action: 'deny', requestId }),
+                    },
+                ],
+            },
+            { tag: 'note', elements: [{ tag: 'plain_text', content: `ID: ${requestId}` }] },
+        ],
+    };
+    return JSON.stringify(card);
+}
+export function buildPermissionResultCard(toolName, decision, requestId) {
+    const isAllowed = decision === 'allow';
+    const card = {
+        config: { wide_screen_mode: true, update_multi: true },
+        header: {
+            template: isAllowed ? 'green' : 'red',
+            title: { tag: 'plain_text', content: `🔐 ${toolName} - ${isAllowed ? '已允许 ✓' : '已拒绝 ✗'}` },
+        },
+        elements: [
+            { tag: 'markdown', content: isAllowed ? '✅ 操作已允许执行。' : '❌ 操作已被拒绝。' },
+            {
+                tag: 'action',
+                actions: [
+                    {
+                        tag: 'button',
+                        text: { tag: 'plain_text', content: isAllowed ? '✅ 已允许' : '✅ 允许' },
+                        type: isAllowed ? 'primary' : 'default',
+                        disabled: true,
+                        value: requestId ? { action: 'allow', requestId } : undefined,
+                    },
+                    {
+                        tag: 'button',
+                        text: { tag: 'plain_text', content: !isAllowed ? '❌ 已拒绝' : '❌ 拒绝' },
+                        type: !isAllowed ? 'danger' : 'default',
+                        disabled: true,
+                        value: requestId ? { action: 'deny', requestId } : undefined,
+                    },
+                ],
+            },
+        ],
+    };
+    return JSON.stringify(card);
+}
+// ─── CardKit JSON 2.0 ───
+export function truncateForStreaming(text) {
+    return truncateText(text, MAX_STREAMING_CONTENT_LENGTH);
+}
+export function buildCardV2Object(options, cardId) {
+    const { content, status, note, thinking } = options;
+    const elements = [];
+    // 完成状态下，如果有思考过程，添加折叠面板
+    if (status === 'done' && thinking) {
+        elements.push({
+            tag: 'collapsible_panel',
+            expanded: false,
+            header: {
+                title: { tag: 'markdown', content: '💭 **思考过程**' },
+            },
+            border: { color: 'grey' },
+            elements: [{ tag: 'markdown', content: thinking }],
+        });
+    }
+    elements.push({
+        tag: 'markdown',
+        content: truncateForStreaming(content) || '...',
+        element_id: 'main_content',
+    });
+    elements.push({
+        tag: 'markdown',
+        content: note || '',
+        text_size: 'notation',
+        element_id: 'note_area',
+    });
+    // 在处理中、思考中和流式输出状态时添加停止按钮
+    if ((status === 'processing' || status === 'thinking' || status === 'streaming') && cardId) {
+        elements.push({
+            tag: 'button',
+            text: { tag: 'plain_text', content: '⏹️ 停止' },
+            type: 'danger',
+            value: { action: 'stop', card_id: cardId },
+            element_id: 'action_stop',
+        });
+    }
+    const isActive = status === 'processing' || status === 'thinking' || status === 'streaming';
+    return {
+        schema: '2.0',
+        config: {
+            update_multi: true,
+            ...(isActive ? { streaming_mode: true } : {}),
+        },
+        header: {
+            template: HEADER_TEMPLATES[status],
+            title: { tag: 'plain_text', content: HEADER_TITLES[status] },
+        },
+        body: {
+            direction: 'vertical',
+            elements,
+        },
+    };
+}
+export function buildCardV2(options, cardId) {
+    return JSON.stringify(buildCardV2Object(options, cardId));
+}

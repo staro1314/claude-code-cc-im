@@ -1,0 +1,258 @@
+/**
+ * 共享的 Claude 任务执行逻辑
+ * 封装各平台重复的节流更新、完成统计、竞态保护等代码
+ */
+import { access } from 'node:fs/promises';
+import { resolve as pathResolve } from 'node:path';
+import { runClaude } from '../claude/cli-runner.js';
+import { formatToolStats, formatToolCallNotification, trackCost, getContextWarning } from './utils.js';
+import { createLogger } from '../logger.js';
+const log = createLogger('ClaudeTask');
+/**
+ * 检测工具名是否为截图工具
+ */
+export function isScreenshotTool(toolName) {
+    return toolName.toLowerCase().includes('screenshot');
+}
+/**
+ * 从工具输入中提取截图文件路径
+ */
+export function extractScreenshotPath(toolInput) {
+    for (const key of ['filePath', 'file_path', 'filename', 'path']) {
+        const val = toolInput[key];
+        if (typeof val === 'string' && val.length > 0)
+            return val;
+    }
+    return undefined;
+}
+/**
+ * 构建完成 note（耗时/费用/工具统计/模型/上下文警告）
+ */
+function buildCompletionNote(result, sessionManager, ctx) {
+    const toolInfo = formatToolStats(result.toolStats, result.numTurns);
+    const noteParts = [];
+    if (result.cost > 0) {
+        noteParts.push(`耗时 ${(result.durationMs / 1000).toFixed(1)}s`);
+        noteParts.push(`费用 $${result.cost.toFixed(4)}`);
+    }
+    else {
+        noteParts.push('完成');
+    }
+    if (toolInfo)
+        noteParts.push(toolInfo);
+    if (result.model)
+        noteParts.push(result.model);
+    // 轮次追踪 & 上下文警告
+    const totalTurns = ctx.threadId
+        ? sessionManager.addTurnsForThread(ctx.userId, ctx.threadId, result.numTurns)
+        : sessionManager.addTurns(ctx.userId, result.numTurns);
+    const ctxWarning = getContextWarning(totalTurns);
+    if (ctxWarning)
+        noteParts.push(ctxWarning);
+    return noteParts.join(' | ');
+}
+/**
+ * 执行 Claude 任务的共享逻辑
+ */
+export function runClaudeTask(deps, ctx, prompt, adapter) {
+    const { config, sessionManager, userCosts } = deps;
+    return new Promise((resolve) => {
+        let lastUpdateTime = 0;
+        let pendingUpdate = null;
+        let settled = false;
+        let firstContentLogged = false;
+        let wasThinking = false;
+        let thinkingText = '';
+        let toolLines = [];
+        const startTime = Date.now();
+        const screenshotPaths = [];
+        let lastActivityTime = startTime;
+        let stallLogTimer = null;
+        // 任务状态对象（可变引用，调用方通过 onTaskReady 存入 runningTasks）
+        let taskState;
+        const cleanup = () => {
+            if (pendingUpdate) {
+                clearTimeout(pendingUpdate);
+                pendingUpdate = null;
+            }
+            if (stallLogTimer) {
+                clearInterval(stallLogTimer);
+                stallLogTimer = null;
+            }
+            adapter.extraCleanup?.();
+        };
+        const settle = () => {
+            if (settled)
+                return;
+            settled = true;
+            cleanup();
+            resolve();
+        };
+        const throttledUpdate = (content) => {
+            taskState.latestContent = content;
+            const now = Date.now();
+            const elapsed = now - lastUpdateTime;
+            if (elapsed >= adapter.throttleMs) {
+                lastUpdateTime = now;
+                if (pendingUpdate) {
+                    clearTimeout(pendingUpdate);
+                    pendingUpdate = null;
+                }
+                const toolNote = toolLines.length > 0 ? toolLines.slice(-3).join('\n') : undefined;
+                adapter.streamUpdate(taskState.latestContent, toolNote);
+            }
+            else if (!pendingUpdate) {
+                pendingUpdate = setTimeout(() => {
+                    pendingUpdate = null;
+                    lastUpdateTime = Date.now();
+                    const toolNote = toolLines.length > 0 ? toolLines.slice(-3).join('\n') : undefined;
+                    adapter.streamUpdate(taskState.latestContent, toolNote);
+                }, adapter.throttleMs - elapsed);
+            }
+        };
+        const handle = runClaude(config.claudeCliPath, prompt, ctx.sessionId, ctx.workDir, {
+            onSessionId: (id) => {
+                if (ctx.threadId) {
+                    sessionManager.setSessionIdForThread(ctx.userId, ctx.threadId, id);
+                    log.info(`Session created for user ${ctx.userId}, thread=${ctx.threadId}: ${id}`);
+                }
+                else if (ctx.convId) {
+                    sessionManager.setSessionIdForConv(ctx.userId, ctx.convId, id);
+                    log.info(`Session created for user ${ctx.userId}, convId=${ctx.convId}: ${id}`);
+                }
+            },
+            onThinking: (thinking) => {
+                lastActivityTime = Date.now();
+                if (!firstContentLogged) {
+                    firstContentLogged = true;
+                    log.info(`First content (thinking) for user ${ctx.userId} after ${Date.now() - startTime}ms`);
+                    adapter.onFirstContent?.();
+                }
+                wasThinking = true;
+                thinkingText = thinking;
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const display = `🧠 **模型思考中** (${elapsed}s)\n\n${thinking}`;
+                throttledUpdate(display);
+            },
+            onText: (accumulated) => {
+                lastActivityTime = Date.now();
+                if (!firstContentLogged) {
+                    firstContentLogged = true;
+                    log.info(`First content (text) for user ${ctx.userId} after ${Date.now() - startTime}ms`);
+                    adapter.onFirstContent?.();
+                }
+                if (wasThinking && adapter.onThinkingToText) {
+                    wasThinking = false;
+                    if (pendingUpdate) {
+                        clearTimeout(pendingUpdate);
+                        pendingUpdate = null;
+                    }
+                    lastUpdateTime = Date.now();
+                    taskState.latestContent = accumulated;
+                    adapter.onThinkingToText(accumulated, thinkingText);
+                    return;
+                }
+                wasThinking = false;
+                throttledUpdate(accumulated);
+            },
+            onToolUse: (toolName, toolInput) => {
+                lastActivityTime = Date.now();
+                const notification = formatToolCallNotification(toolName, toolInput);
+                toolLines.push(notification);
+                if (toolLines.length > 5)
+                    toolLines = toolLines.slice(-5);
+                throttledUpdate(taskState.latestContent);
+                // 收集截图路径
+                if (isScreenshotTool(toolName) && toolInput) {
+                    const rawPath = extractScreenshotPath(toolInput);
+                    if (rawPath) {
+                        const absPath = rawPath.startsWith('/') ? rawPath : pathResolve(ctx.workDir, rawPath);
+                        if (!screenshotPaths.includes(absPath)) {
+                            screenshotPaths.push(absPath);
+                        }
+                    }
+                }
+            },
+            onComplete: async (result) => {
+                if (settled)
+                    return;
+                settled = true;
+                // 先清除 pending 的节流定时器，防止它在 sendComplete 期间触发
+                // 导致 streaming 更新覆盖 done 状态
+                if (pendingUpdate) {
+                    clearTimeout(pendingUpdate);
+                    pendingUpdate = null;
+                }
+                const note = buildCompletionNote(result, sessionManager, ctx);
+                log.info(`Claude completed for user ${ctx.userId}: success=${result.success}, cost=$${result.cost.toFixed(4)}`);
+                trackCost(userCosts, ctx.userId, result.cost, result.durationMs);
+                const finalContent = result.accumulated || result.result || '(无输出)';
+                try {
+                    await adapter.sendComplete(finalContent, note, thinkingText || undefined);
+                }
+                catch (err) {
+                    log.error('Failed to send complete:', err);
+                }
+                // 完成后自动发送截图
+                if (adapter.sendImage && screenshotPaths.length > 0) {
+                    for (const imgPath of screenshotPaths) {
+                        try {
+                            await access(imgPath);
+                            await adapter.sendImage(imgPath);
+                        }
+                        catch (err) {
+                            log.warn(`Screenshot send skipped (${imgPath}):`, err);
+                        }
+                    }
+                }
+                cleanup();
+                resolve();
+            },
+            onError: async (error) => {
+                if (settled)
+                    return;
+                settled = true;
+                if (pendingUpdate) {
+                    clearTimeout(pendingUpdate);
+                    pendingUpdate = null;
+                }
+                log.error(`Claude error for user ${ctx.userId}, sessionId=${ctx.sessionId ?? 'new'}: ${error}`);
+                try {
+                    await adapter.sendError(error);
+                }
+                catch (err) {
+                    log.error('Failed to send error:', err);
+                }
+                cleanup();
+                resolve();
+            },
+        }, {
+            skipPermissions: config.claudeSkipPermissions,
+            timeoutMs: config.claudeTimeoutMs,
+            model: sessionManager.getModel(ctx.userId, ctx.threadId) ?? config.claudeModel,
+            chatId: ctx.chatId,
+            hookPort: config.hookPort,
+            threadRootMsgId: ctx.threadRootMsgId,
+            threadId: ctx.threadId,
+            platform: ctx.platform,
+            proxyUrl: config.proxyUrl,
+        });
+        taskState = { handle, latestContent: '', settle, startedAt: Date.now() };
+        adapter.onTaskReady(taskState);
+        // 定期检查任务活跃度，长时间无活动时输出日志
+        stallLogTimer = setInterval(() => {
+            if (settled)
+                return;
+            const now = Date.now();
+            const totalElapsed = Math.floor((now - startTime) / 1000);
+            const stallSeconds = Math.floor((now - lastActivityTime) / 1000);
+            if (!firstContentLogged) {
+                log.warn(`Task for user ${ctx.userId} waiting for first response... (${totalElapsed}s elapsed)`);
+            }
+            else if (stallSeconds >= 30) {
+                log.info(`Task for user ${ctx.userId} running ${totalElapsed}s total, no output for ${stallSeconds}s (likely tool execution)`);
+            }
+        }, 60_000);
+        stallLogTimer.unref();
+    });
+}

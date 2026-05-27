@@ -1,0 +1,516 @@
+import { join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { createWecomSender, sendTextReply as wecomSendText } from './message-sender.js';
+import { AccessControl } from '../access/access-control.js';
+import { RequestQueue } from '../queue/request-queue.js';
+import { CommandHandler } from '../commands/handler.js';
+import { registerPermissionSender, registerWatchSender, resolvePermissionById } from '../hook/permission-server.js';
+import { runClaudeTask } from '../shared/claude-task.js';
+import { startTaskCleanup } from '../shared/task-cleanup.js';
+import { MessageDedup } from '../shared/message-dedup.js';
+import { WECOM_THROTTLE_MS, IMAGE_DIR } from '../constants.js';
+import { setActiveChatId } from '../shared/active-chats.js';
+import { createLogger } from '../logger.js';
+const log = createLogger('WecomHandler');
+/**
+ * 从消息 body 中提取用户、聊天信息
+ */
+function extractInfo(body) {
+    const userId = body.from?.userid ?? '';
+    const isGroup = body.chattype === 'group';
+    const chatId = isGroup ? (body.chatid ?? userId) : userId;
+    const text = body.text?.content ?? body.voice?.content ?? '';
+    const msgId = body.msgid ?? '';
+    return { userId, chatId, isGroup, text, msgId };
+}
+/**
+ * 清理群聊消息文本：去掉 @机器人名 标记
+ * 企业微信智能机器人 SDK 在群聊中只会推送 @机器人的消息，
+ * 所以只要收到群聊消息，就一定是被 mention 的，无需额外检查。
+ * 但 text.content 中仍包含 @机器人名 文本，需要去掉。
+ */
+export function cleanGroupText(text, botName) {
+    let cleaned = text;
+    if (botName) {
+        // 精确匹配机器人名称（大小写不敏感）
+        const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        cleaned = cleaned.replace(new RegExp(`@${escaped}\\s*`, 'gi'), '');
+    }
+    else {
+        // 启发式去除 @ 提及（降级方案，推荐配置 WECOM_BOT_NAME 以精确匹配）
+        // 局限：若命令参数中包含 @（如 /ask 给 @someone 发邮件 @Bot），
+        // 正则会从第一个 @ 开始截断，导致参数丢失。
+        const slashIdx = cleaned.indexOf('/');
+        if (slashIdx >= 0) {
+            const cmdPart = cleaned.substring(slashIdx);
+            cleaned = cmdPart.replace(/\s*@.*$/s, '');
+        }
+        else {
+            // 非命令文本：去掉开头的 @word（无法完美处理多词名称）
+            cleaned = cleaned.replace(/^@\S+\s*/, '');
+        }
+    }
+    return cleaned.trim();
+}
+/**
+ * 下载企业微信图片到本地
+ */
+async function downloadWecomImage(wsClient, url, aesKey) {
+    await mkdir(IMAGE_DIR, { recursive: true });
+    const { buffer, filename } = await wsClient.downloadFile(url, aesKey);
+    const ext = filename?.split('.').pop() ?? 'jpg';
+    const safeFilename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const imagePath = join(IMAGE_DIR, safeFilename);
+    await writeFile(imagePath, buffer);
+    return imagePath;
+}
+export function setupWecomHandlers(wsClient, config, sessionManager) {
+    const accessControl = new AccessControl(config.allowedUserIds);
+    const requestQueue = new RequestQueue();
+    const userCosts = new Map();
+    const runningTasks = new Map();
+    const stopTaskCleanup = startTaskCleanup(runningTasks);
+    const dedup = new MessageDedup();
+    const sender = createWecomSender(wsClient);
+    // accepting flag: 标记是否接受新消息
+    let accepting = true;
+    let taskCounter = 0;
+    /**
+     * 构建群聊/私聊的会话上下文（threadCtx、workDir、convId、queueKey）
+     */
+    function resolveSessionContext(userId, chatId, isGroup) {
+        // 企业微信没有话题根消息概念，rootMessageId 留空
+        const threadCtx = isGroup ? { threadId: chatId, rootMessageId: '' } : undefined;
+        // 群聊：提前创建 thread session，确保 workDir 独立于单聊
+        // 避免 getWorkDirForThread 回退到用户单聊 workDir 导致两者联动
+        if (threadCtx && !sessionManager.getThreadSession(userId, threadCtx.threadId)) {
+            sessionManager.setThreadSession(userId, threadCtx.threadId, {
+                workDir: sessionManager.getWorkDir(userId),
+                rootMessageId: '',
+                threadId: threadCtx.threadId,
+            });
+        }
+        const workDir = threadCtx
+            ? sessionManager.getWorkDirForThread(userId, threadCtx.threadId)
+            : sessionManager.getWorkDir(userId);
+        const convId = threadCtx ? undefined : sessionManager.getConvId(userId);
+        const queueKey = threadCtx ? threadCtx.threadId : (convId ?? userId);
+        return { threadCtx, workDir, convId, queueKey };
+    }
+    const commandHandler = new CommandHandler({
+        config,
+        sessionManager,
+        requestQueue,
+        sender: { sendTextReply: (chatId, text) => sender.sendTextReply(chatId, text) },
+        userCosts,
+        getRunningTasksSize: () => runningTasks.size,
+    });
+    // 注册权限发送器
+    registerPermissionSender('wecom', {
+        sendPermissionCard: (chatId, requestId, toolName, toolInput) => sender.sendPermissionCard(chatId, requestId, toolName, toolInput),
+        updatePermissionCard: (params) => sender.updatePermissionCard(params),
+    });
+    // 注册 watch 通知发送器
+    registerWatchSender('wecom', {
+        sendWatchNotify: (chatId, text) => wecomSendText(chatId, text),
+    });
+    /**
+     * 核心请求处理器（frame 可选，有 frame 时使用流式回复，无 frame 时退化为 sendMessage）
+     */
+    async function handleClaudeRequestCore(userId, chatId, prompt, workDir, convId, frame, threadCtx) {
+        const sessionId = threadCtx
+            ? sessionManager.getSessionIdForThread(userId, threadCtx.threadId)
+            : convId ? sessionManager.getSessionIdForConv(userId, convId) : undefined;
+        log.info(`Running Claude for user ${userId}, convId=${convId}, workDir=${workDir}, sessionId=${sessionId ?? 'new'}`);
+        const taskKey = `${userId}:${++taskCounter}`;
+        let waitingTimer = null;
+        // 有 frame 时使用流式回复，无 frame 时 sender 内部会退化为 sendMessage
+        if (frame) {
+            sender.initStream(frame, taskKey);
+        }
+        // 追踪内容变化，用于检测工具执行期间的停滞
+        let lastSeenContent = '';
+        let firstContentReceived = false;
+        let isThinking = false;
+        await runClaudeTask({ config, sessionManager, userCosts }, {
+            userId,
+            chatId,
+            workDir,
+            sessionId,
+            convId,
+            threadId: threadCtx?.threadId,
+            platform: 'wecom',
+            taskKey,
+        }, prompt, {
+            throttleMs: WECOM_THROTTLE_MS,
+            streamUpdate: (content, toolNote) => {
+                lastSeenContent = content;
+                // 通过内容前缀判断是否在思考阶段（claude-task 中思考内容以 💭 开头）
+                isThinking = content.startsWith('💭');
+                sender.sendStreamUpdate(content, toolNote).catch(() => { });
+            },
+            sendComplete: async (content, note) => {
+                try {
+                    if (frame) {
+                        await sender.sendStreamComplete(content, note);
+                    }
+                    else {
+                        // 无 frame（命令触发），退化为 sendMessage
+                        const text = note ? `${content}\n\n---\n> ${note}` : content;
+                        await sender.sendTextReply(chatId, text);
+                    }
+                }
+                catch (err) {
+                    log.error('Failed to send complete:', err);
+                }
+            },
+            sendError: async (error) => {
+                try {
+                    if (frame) {
+                        await sender.sendStreamError(error);
+                    }
+                    else {
+                        await sender.sendTextReply(chatId, `❌ 错误\n\n${error}`);
+                    }
+                }
+                catch (err) {
+                    log.error('Failed to send error:', err);
+                }
+            },
+            onThinkingToText: (content, thinkingText) => {
+                isThinking = false;
+                sender.resetStreamForTextSwitch(content, thinkingText).catch(() => { });
+            },
+            extraCleanup: () => {
+                if (waitingTimer) {
+                    clearInterval(waitingTimer);
+                    waitingTimer = null;
+                }
+                sender.cleanupStream();
+                runningTasks.delete(taskKey);
+            },
+            onTaskReady: (state) => {
+                runningTasks.set(taskKey, state);
+                // 有 frame 时才启动活动计时器（无 frame 场景没有流式通道）
+                if (frame) {
+                    sender.sendStreamUpdate('⏳ 正在处理...').catch(() => { });
+                    const startTime = Date.now();
+                    let stallChecks = 0;
+                    waitingTimer = setInterval(() => {
+                        if (!runningTasks.has(taskKey)) {
+                            if (waitingTimer) {
+                                clearInterval(waitingTimer);
+                                waitingTimer = null;
+                            }
+                            return;
+                        }
+                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                        if (!firstContentReceived) {
+                            // 首次内容前：持续显示等待状态
+                            sender.sendStreamUpdate(`⏳ 等待 Claude 响应... (${elapsed}s)`).catch(() => { });
+                        }
+                        else if (isThinking) {
+                            // 思考阶段：不做 stall 检测，思考本身就可能暂停
+                        }
+                        else if (state.latestContent === lastSeenContent) {
+                            // 内容未变化（工具执行中）：重发内容保持流活跃
+                            stallChecks++;
+                            if (stallChecks >= 2) {
+                                // 停滞 6~9s 才触发，避免正常节流间隔内的误判
+                                sender.sendStreamUpdate(state.latestContent, `⏳ 工具执行中... (${elapsed}s)`).catch(() => { });
+                            }
+                        }
+                        else {
+                            // 内容有更新，重置计数
+                            stallChecks = 0;
+                            lastSeenContent = state.latestContent;
+                        }
+                    }, 3000);
+                    waitingTimer.unref();
+                }
+            },
+            onFirstContent: () => {
+                firstContentReceived = true;
+            },
+        });
+    }
+    // CommandHandler 使用的签名（无 frame）
+    async function handleClaudeRequest(userId, chatId, prompt, workDir, convId, threadCtx) {
+        await handleClaudeRequestCore(userId, chatId, prompt, workDir, convId, undefined, threadCtx);
+    }
+    /**
+     * 消息前置检查（去重、访问控制、活跃聊天设置）
+     * @returns true 表示通过检查，false 表示应跳过处理
+     */
+    async function preCheck(userId, chatId, msgId) {
+        if (!accepting)
+            return false;
+        if (dedup.isDuplicate(`${chatId}:${msgId}`)) {
+            log.debug(`Duplicate message ${msgId}, skipping`);
+            return false;
+        }
+        if (!accessControl.isAllowed(userId)) {
+            log.warn(`Access denied for user ${userId}. Add to ALLOWED_USER_IDS to grant access.`);
+            await sender.sendTextReply(chatId, '抱歉，您没有访问权限。\n\n请联系管理员将您的用户 ID 添加到白名单。\n您的 ID: ' + userId);
+            return false;
+        }
+        setActiveChatId('wecom', chatId);
+        return true;
+    }
+    /**
+     * 通用消息处理逻辑
+     */
+    async function handleMessage(frame, text, userId, chatId, msgId, isGroup) {
+        if (!await preCheck(userId, chatId, msgId))
+            return;
+        let cleanText = text.trim();
+        // 群聊文本清理：去掉 @机器人名 标记
+        if (isGroup) {
+            cleanText = cleanGroupText(cleanText, config.wecomBotName);
+        }
+        if (!cleanText)
+            return;
+        log.debug(`Processing message from user ${userId}: ${cleanText.slice(0, 100)}${cleanText.length > 100 ? '...' : ''}`);
+        // 处理 /stop 命令（企业微信特有，因为按钮可能不可用）
+        if (cleanText === '/stop') {
+            // 找到该用户最新的运行任务并停止（taskKey 格式为 userId:counter，用数值比较 counter）
+            const prefix = `${userId}:`;
+            let latestKey = null;
+            let latestCounter = -1;
+            for (const key of runningTasks.keys()) {
+                if (key.startsWith(prefix)) {
+                    const counter = parseInt(key.slice(prefix.length), 10);
+                    if (counter > latestCounter) {
+                        latestCounter = counter;
+                        latestKey = key;
+                    }
+                }
+            }
+            if (latestKey) {
+                const task = runningTasks.get(latestKey);
+                runningTasks.delete(latestKey);
+                task.settle();
+                task.handle.abort();
+                await sender.sendTextReply(chatId, '⏹️ 已停止当前任务');
+            }
+            else {
+                await sender.sendTextReply(chatId, '当前没有运行中的任务');
+            }
+            return;
+        }
+        // 构建会话上下文（群聊隔离 workDir/sessionId）
+        const { threadCtx, workDir, convId, queueKey } = resolveSessionContext(userId, chatId, isGroup);
+        // 统一命令分发
+        if (await commandHandler.dispatch(cleanText, chatId, userId, 'wecom', handleClaudeRequest, threadCtx)) {
+            return;
+        }
+        // 路由到 Claude
+        const enqueueResult = requestQueue.enqueue(userId, queueKey, cleanText, async (prompt) => {
+            await handleClaudeRequestCore(userId, chatId, prompt, workDir, convId, frame, threadCtx);
+        });
+        if (enqueueResult === 'rejected') {
+            log.warn(`Queue full for user: ${userId}`);
+            await sender.sendTextReply(chatId, '您的请求队列已满，请等待当前任务完成后再试。');
+        }
+        else if (enqueueResult === 'queued') {
+            await sender.sendTextReply(chatId, '前面还有任务在处理中，您的请求已排队等待。');
+        }
+    }
+    // --- 注册事件监听器 ---
+    // 文本消息
+    wsClient.on('message.text', async (frame) => {
+        const body = frame.body;
+        if (!body)
+            return;
+        const { userId, chatId, text, msgId, isGroup } = extractInfo(body);
+        await handleMessage(frame, text, userId, chatId, msgId, isGroup);
+    });
+    // 语音消息（已转文字）
+    wsClient.on('message.voice', async (frame) => {
+        const body = frame.body;
+        if (!body)
+            return;
+        const { userId, chatId, msgId, isGroup } = extractInfo(body);
+        const text = body.voice?.content ?? '';
+        await handleMessage(frame, text, userId, chatId, msgId, isGroup);
+    });
+    // 图片消息
+    wsClient.on('message.image', async (frame) => {
+        const body = frame.body;
+        if (!body)
+            return;
+        const { userId, chatId, msgId, isGroup } = extractInfo(body);
+        if (!await preCheck(userId, chatId, msgId))
+            return;
+        const imageUrl = body.image?.url;
+        const aesKey = body.image?.aeskey;
+        if (!imageUrl) {
+            log.warn('Image message without URL');
+            return;
+        }
+        let imagePath;
+        try {
+            imagePath = await downloadWecomImage(wsClient, imageUrl, aesKey);
+        }
+        catch (err) {
+            log.error('Failed to download image:', err);
+            await sender.sendTextReply(chatId, '图片下载失败，请重试。');
+            return;
+        }
+        const prompt = `用户发送了一张图片，已保存到 ${imagePath}。请用 Read 工具查看并分析图片内容。`;
+        log.info(`User ${userId} [image]: ${prompt.slice(0, 100)}...`);
+        const { threadCtx, workDir, convId, queueKey } = resolveSessionContext(userId, chatId, isGroup);
+        const enqueueResult = requestQueue.enqueue(userId, queueKey, prompt, async (p) => {
+            await handleClaudeRequestCore(userId, chatId, p, workDir, convId, frame, threadCtx);
+        });
+        if (enqueueResult === 'rejected') {
+            await sender.sendTextReply(chatId, '您的请求队列已满，请等待当前任务完成后再试。');
+        }
+        else if (enqueueResult === 'queued') {
+            await sender.sendTextReply(chatId, '前面还有任务在处理中，您的请求已排队等待。');
+        }
+    });
+    // 图文混排消息
+    wsClient.on('message.mixed', async (frame) => {
+        const body = frame.body;
+        if (!body)
+            return;
+        const { userId, chatId, msgId, isGroup } = extractInfo(body);
+        if (!await preCheck(userId, chatId, msgId))
+            return;
+        const msgItems = body.mixed?.msg_item ?? [];
+        const textParts = [];
+        const imagePaths = [];
+        for (const item of msgItems) {
+            if (item.msgtype === 'text' && item.text?.content) {
+                textParts.push(item.text.content);
+            }
+            else if (item.msgtype === 'image' && item.image?.url) {
+                try {
+                    const path = await downloadWecomImage(wsClient, item.image.url, item.image.aeskey);
+                    imagePaths.push(path);
+                }
+                catch (err) {
+                    log.error('Failed to download mixed image:', err);
+                }
+            }
+        }
+        // 群聊文本清理：去掉 @机器人名 标记
+        const textContent = isGroup
+            ? cleanGroupText(textParts.join(' '), config.wecomBotName)
+            : textParts.join(' ').trim();
+        let prompt;
+        if (imagePaths.length > 0) {
+            const imageDesc = imagePaths.map(p => `已保存到 ${p}`).join('，');
+            const captionPart = textContent ? `（附言：${textContent}）` : '';
+            prompt = `用户发送了 ${imagePaths.length} 张图片${captionPart}，${imageDesc}。请用 Read 工具查看并分析图片内容。`;
+        }
+        else {
+            prompt = textContent;
+        }
+        if (!prompt)
+            return;
+        log.info(`User ${userId} [mixed]: ${prompt.slice(0, 100)}...`);
+        const { threadCtx, workDir, convId, queueKey } = resolveSessionContext(userId, chatId, isGroup);
+        const enqueueResult = requestQueue.enqueue(userId, queueKey, prompt, async (p) => {
+            await handleClaudeRequestCore(userId, chatId, p, workDir, convId, frame, threadCtx);
+        });
+        if (enqueueResult === 'rejected') {
+            await sender.sendTextReply(chatId, '您的请求队列已满，请等待当前任务完成后再试。');
+        }
+        else if (enqueueResult === 'queued') {
+            await sender.sendTextReply(chatId, '前面还有任务在处理中，您的请求已排队等待。');
+        }
+    });
+    // 模板卡片事件（停止按钮、权限按钮）
+    wsClient.on('event.template_card_event', async (frame) => {
+        const body = frame.body;
+        if (!body)
+            return;
+        // 企业微信模板卡片事件的 event_key 在 template_card_event 对象内
+        const eventKey = body.event?.template_card_event?.event_key ?? '';
+        const userId = body.from?.userid ?? '';
+        log.info(`Template card event from ${userId}: key=${eventKey}`);
+        if (eventKey.startsWith('stop_')) {
+            const taskKey = eventKey.replace('stop_', '');
+            const taskInfo = runningTasks.get(taskKey);
+            if (taskInfo) {
+                runningTasks.delete(taskKey);
+                taskInfo.settle();
+                taskInfo.handle.abort();
+                // 更新卡片显示已停止
+                try {
+                    const taskId = body.event?.template_card_event?.task_id ?? '';
+                    await wsClient.updateTemplateCard(frame, {
+                        card_type: 'text_notice',
+                        main_title: { title: 'Claude Code' },
+                        sub_title_text: '⏹️ 已停止',
+                        task_id: taskId,
+                    });
+                }
+                catch (err) {
+                    log.warn('Failed to update stop card:', err);
+                }
+            }
+            else {
+                try {
+                    const taskId = body.event?.template_card_event?.task_id ?? '';
+                    await wsClient.updateTemplateCard(frame, {
+                        card_type: 'text_notice',
+                        main_title: { title: 'Claude Code' },
+                        sub_title_text: '任务已完成或不存在',
+                        task_id: taskId,
+                    });
+                }
+                catch (err) {
+                    log.warn('Failed to update card:', err);
+                }
+            }
+        }
+        else if (eventKey.startsWith('perm_allow_') || eventKey.startsWith('perm_deny_')) {
+            const isAllow = eventKey.startsWith('perm_allow_');
+            const requestId = eventKey.replace(/^perm_(allow|deny)_/, '');
+            const decision = isAllow ? 'allow' : 'deny';
+            const resolved = resolvePermissionById(requestId, decision);
+            // 更新卡片显示结果（使用 button_interaction 类型保持一致）
+            try {
+                const taskId = body.event?.template_card_event?.task_id ?? '';
+                log.debug(`Updating card: taskId=${taskId}, requestId=${requestId}, decision=${decision}`);
+                const result = await wsClient.updateTemplateCard(frame, {
+                    card_type: 'button_interaction',
+                    main_title: { title: resolved ? (isAllow ? '✅ 已允许' : '❌ 已拒绝') : '⚠️ 请求已过期' },
+                    sub_title_text: resolved ? `权限请求已${isAllow ? '允许' : '拒绝'}` : '请求已过期或不存在',
+                    task_id: taskId,
+                    button_list: [
+                        { text: isAllow ? '✅ 已允许' : '✅ 允许', style: 1, key: `perm_allow_${requestId}`, disabled: true },
+                        { text: !isAllow ? '❌ 已拒绝' : '❌ 拒绝', style: 3, key: `perm_deny_${requestId}`, disabled: true },
+                    ],
+                });
+                log.info(`Permission card updated: ${requestId} -> ${decision}, result:`, result);
+            }
+            catch (err) {
+                log.warn('Failed to update permission card:', err?.message ?? err);
+                // 降级：发送确认消息（使用 markdown 类型）
+                try {
+                    const confirmMsg = resolved
+                        ? (isAllow ? '✅ 已允许，正在执行...' : '❌ 已拒绝，操作取消')
+                        : '⚠️ 请求已过期或不存在';
+                    await wsClient.sendMessage(userId, {
+                        msgtype: 'markdown',
+                        markdown: { content: confirmMsg },
+                    });
+                }
+                catch (fallbackErr) {
+                    log.warn('Failed to send fallback message:', fallbackErr);
+                }
+            }
+        }
+    });
+    return {
+        stop: () => {
+            accepting = false;
+            stopTaskCleanup();
+        },
+        getRunningTaskCount: () => runningTasks.size,
+    };
+}

@@ -1,0 +1,58 @@
+{
+  "name": "cc-im",
+  "version": "1.6.0",
+  "description": "Multi-platform bot bridge (Feishu & Telegram & WeCom) for Claude Code CLI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/congqiu/cc-im.git"
+  },
+  "homepage": "https://github.com/congqiu/cc-im",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "cc-im": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/hook/hook-script.js dist/hook/watch-script.js dist/cli.js",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build",
+    "lint": "biome check src/ tests/",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "telegram",
+    "wecom",
+    "wechat-work",
+    "claude",
+    "claude-code",
+    "bot",
+    "bridge"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "@wecom/aibot-node-sdk": "^1.0.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
+    "@types/node": "^25.3.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "dotenv": "^17.3.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
