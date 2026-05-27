@@ -52,8 +52,26 @@ function batStop(ccImPath) {
     return `@echo off
 chcp 65001 >nul
 echo Stopping CC-IM...
-cd /d "${ccImPath}"
-node dist/cli.js stop
+
+:: Kill cc-im service by port
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":18790.*LISTENING"') do (
+    echo Killing process %%a on port 18790
+    taskkill /PID %%a /F 2>nul
+)
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":18900.*LISTENING"') do (
+    echo Killing process %%a on port 18900
+    taskkill /PID %%a /F 2>nul
+)
+
+:: Kill all channel-related processes via PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { Get-Process claude -EA 0 | ForEach-Object { $c = (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.Id)).CommandLine; if ($c -like '*dangerously-load-development-channels*') { Write-Host ('Killing Claude channel PID: ' + $_.Id); Stop-Process -Id $_.Id -Force } }; Get-Process node -EA 0 | ForEach-Object { $c = (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.Id)).CommandLine; if ($c -like '*wechat-channel*') { Write-Host ('Killing wechat-channel PID: ' + $_.Id); Stop-Process -Id $_.Id -Force }; if ($c -like '*cli.js*channel*' -or $c -like '*cli.js*start*') { Write-Host ('Killing cc-im service PID: ' + $_.Id); Stop-Process -Id $_.Id -Force } } }"
+
+:: Clean channel registry
+del "%USERPROFILE%\\.cc-im\\channel-registry.json" 2>nul
+del "%USERPROFILE%\\.cc-im\\channel-port" 2>nul
+del "%USERPROFILE%\\.cc-im\\bridge-port" 2>nul
+
+echo CC-IM stopped.
 echo.
 pause
 `;
@@ -63,10 +81,33 @@ function batRestart(ccImPath) {
     return `@echo off
 chcp 65001 >nul
 echo Restarting CC-IM...
-cd /d "${ccImPath}"
-node dist/cli.js stop 2>nul
+
+:: Kill cc-im service by port
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":18790.*LISTENING"') do (
+    echo Killing process %%a on port 18790
+    taskkill /PID %%a /F 2>nul
+)
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":18900.*LISTENING"') do (
+    echo Killing process %%a on port 18900
+    taskkill /PID %%a /F 2>nul
+)
+
+:: Kill all channel-related processes
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { Get-Process claude -EA 0 | ForEach-Object { $c = (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.Id)).CommandLine; if ($c -like '*dangerously-load-development-channels*') { Write-Host ('Killing Claude channel PID: ' + $_.Id); Stop-Process -Id $_.Id -Force } }; Get-Process node -EA 0 | ForEach-Object { $c = (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.Id)).CommandLine; if ($c -like '*wechat-channel*') { Write-Host ('Killing wechat-channel PID: ' + $_.Id); Stop-Process -Id $_.Id -Force }; if ($c -like '*cli.js*channel*' -or $c -like '*cli.js*start*') { Write-Host ('Killing cc-im service PID: ' + $_.Id); Stop-Process -Id $_.Id -Force } } }"
+
+:: Clean registry
+del "%USERPROFILE%\\.cc-im\\channel-registry.json" 2>nul
+del "%USERPROFILE%\\.cc-im\\channel-port" 2>nul
+del "%USERPROFILE%\\.cc-im\\bridge-port" 2>nul
+
 timeout /t 2 /nobreak >nul
-node dist/cli.js start
+
+echo Starting CC-IM in channel mode...
+start "CC-IM" cmd /c "cd /d "${ccImPath}" && node dist/cli.js channel"
+timeout /t 3 /nobreak >nul
+start "Claude Code" cmd /c "cd /d "${workDir}" && claude --dangerously-load-development-channels server:wechat-work"
+
+echo CC-IM restarted in channel mode.
 echo.
 pause
 `;

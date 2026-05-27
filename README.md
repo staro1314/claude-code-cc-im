@@ -20,6 +20,7 @@ CC-IM 让你通过手机上的企业微信、飞书或 Telegram 远程操控 Cla
 ## 功能
 
 - **多平台支持**：飞书、Telegram 和企业微信，可同时运行或单独使用
+- **Channel 模式**：企业微信直连 Claude Code CLI，原生交互体验（Windows 一键启动）
 - **流式输出**：飞书端使用 CardKit 打字机效果，Telegram 端通过 editMessage 实时更新，企业微信端使用 replyStream 原生流式回复
 - **思考过程展示**：实时显示 Claude 的思考过程（折叠面板）
 - **工具调用通知**：流式显示当前正在使用的工具及参数摘要
@@ -41,12 +42,40 @@ CC-IM 让你通过手机上的企业微信、飞书或 Telegram 远程操控 Cla
 - **版本更新检查**：启动时自动检查 npm 最新版本，有更新时提示
 - **日志等级配置**：支持 DEBUG/INFO/WARN/ERROR 四级日志
 
-## 安装
+## 懒人安装（30 秒搞定）
 
-### 前置要求
+> 前置要求：[Node.js >= 20](https://nodejs.org/) + [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 
-- **Node.js >= 20**（[下载](https://nodejs.org/)）
-- **Claude Code CLI**（[安装指南](https://docs.anthropic.com/en/docs/claude-code)）
+### Windows 用户（企业微信 Channel 模式）
+
+```bash
+# 1. 一键安装
+npm install -g cc-im
+
+# 2. 一键配置（自动生成快捷脚本）
+cc-im setup
+
+# 3. 双击 ~/.cc-im/启动.bat 即可使用
+```
+
+安装完成后，`~/.cc-im/` 下会自动生成：
+
+| 脚本 | 说明 |
+|------|------|
+| `启动.bat` | 启动 Channel 服务 + Claude Code 客户端 |
+| `停止.bat` | 停止所有相关进程 |
+| `重启.bat` | 重启服务 |
+
+### macOS / Linux 用户
+
+```bash
+npm install -g cc-im
+cc-im setup
+# 或手动配置环境变量后：
+npx cc-im@latest
+```
+
+## 安装方式
 
 ### 方式一：npm 全局安装（推荐）
 
@@ -57,22 +86,13 @@ npm install -g cc-im
 ### 方式二：从 GitHub 安装
 
 ```bash
-npm install -g github:your-username/cc-im
+npm install -g github:staro1314/claude-code-cc-im
 ```
 
-### 方式三：下载 tgz 包离线安装
-
-1. 从 Releases 下载 `cc-im-x.x.x.tgz`
-2. 本地安装：
+### 方式三：从源码构建
 
 ```bash
-npm install -g cc-im-x.x.x.tgz
-```
-
-### 方式四：从源码构建
-
-```bash
-git clone https://github.com/your-username/cc-im.git
+git clone https://github.com/staro1314/claude-code-cc-im.git
 cd cc-im
 npm install
 npm run build
@@ -83,144 +103,116 @@ npm link
 
 ### 一键配置向导
 
-安装后运行向导，逐步引导完成所有配置：
-
 ```bash
 cc-im setup
 ```
 
 向导会自动检测环境、Claude CLI 路径，引导你选择平台、填写凭证，最后生成配置文件和快捷脚本。
 
-### 手动配置
+### 企业微信 Channel 模式
 
-> 要求：Node.js >= 20，需要预先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+Channel 模式是推荐的 Windows 使用方式。它通过 Claude Code 的 MCP Channel 协议，将企业微信消息直接注入 Claude Code CLI 终端，实现原生交互体验。
 
-#### 同时运行多个平台
+**架构：**
 
-> 要求：Node.js >= 20，需要预先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
-
-### 同时运行多个平台
-
-可以同时启用多个平台，只需配置对应平台的凭证即可：
-
-```bash
-export FEISHU_APP_ID=your_app_id
-export FEISHU_APP_SECRET=your_app_secret
-export TELEGRAM_BOT_TOKEN=your_bot_token
-export WECOM_BOT_ID=your_bot_id
-export WECOM_BOT_SECRET=your_bot_secret
-npx cc-im@latest
+```
+企业微信  →  cc-im 服务(18790)  →  wechat-channel MCP  →  Claude Code CLI
+                                                              ↓
+企业微信  ←  cc-im 服务(18790)  ←  wechat-channel MCP  ←  Claude Code CLI
 ```
 
-服务会自动检测已配置的平台并启动对应的 bot。
-
-### Telegram 平台
-
-1. 通过 [@BotFather](https://t.me/BotFather) 创建 Bot，获取 Token
-2. 配置并启动：
-
-```bash
-# 方式一：环境变量
-export TELEGRAM_BOT_TOKEN=your_bot_token
-npx cc-im@latest
-
-# 方式二：从源码运行
-pnpm install
-cp .env.example .env
-# 编辑 .env，填入 TELEGRAM_BOT_TOKEN
-pnpm dev
-```
-
-3. 在 Telegram 中找到你的 Bot，发送 `/start` 开始使用
-
-### 飞书平台
-
-1. 在[飞书开放平台](https://open.feishu.cn)创建应用
-2. 开启机器人能力
-3. 添加权限：`im:message`、`im:message:send_as_bot`、`im:message.group_msg`、`im:message.p2p_msg:readonly`、`im:resource`、`cardkit:card:write`
-4. 事件订阅中启用 **长连接模式**，订阅以下事件：
-   - `im.message.receive_v1` — 接收消息
-   - `im.message.recalled_v1` — 消息撤回（自动清理话题会话）
-5. 回调订阅
-   - `card.action.trigger` — 卡片交互（停止按钮）
-6. 发布应用
-7. 配置并启动：
-
-```bash
-export FEISHU_APP_ID=your_app_id
-export FEISHU_APP_SECRET=your_app_secret
-npx cc-im@latest
-```
-
-### 企业微信平台
+**配置步骤：**
 
 1. 在[企业微信管理后台](https://work.weixin.qq.com)创建智能机器人应用
 2. 获取机器人的 Bot ID 和 Secret
-3. 配置并启动：
+3. 配置：
 
 ```bash
+# 方式一：环境变量
 export WECOM_BOT_ID=your_bot_id
 export WECOM_BOT_SECRET=your_bot_secret
+
+# 方式二：配置文件 ~/.cc-im/config.json
+```
+
+```json
+{
+  "wecomBotId": "your_bot_id",
+  "wecomBotSecret": "your_bot_secret",
+  "claudeWorkDir": "D:\\project"
+}
+```
+
+4. 启动：
+
+```bash
+# Windows：双击 ~/.cc-im/启动.bat
+# 或手动：
+cc-im channel
+# 另开终端：
+claude --dangerously-load-development-channels server:wechat-work
+```
+
+5. 在企业微信中给机器人发消息，Claude Code 终端会实时显示并回复
+
+**快捷键说明：**
+
+- 企业微信中发送 `/allow` 或 `/y` — 允许权限请求
+- 企业微信中发送 `/deny` 或 `/n` — 拒绝权限请求
+- 企业微信中发送 `/stop` — 停止当前任务
+
+### 其他平台
+
+#### 飞书平台
+
+1. 在[飞书开放平台](https://open.feishu.cn)创建应用，开启机器人能力
+2. 添加权限：`im:message`、`im:message:send_as_bot`、`im:message.group_msg`、`im:message.p2p_msg:readonly`、`im:resource`、`cardkit:card:write`
+3. 事件订阅中启用**长连接模式**，订阅：`im.message.receive_v1`、`im.message.recalled_v1`
+4. 回调订阅：`card.action.trigger`
+5. 发布应用，配置凭证：
+
+```bash
+export FEISHU_APP_ID=your_app_id
+export FEISHU_APP_SECRET=your_app_secret
 npx cc-im@latest
 ```
 
-4. 在企业微信中找到你的机器人，发送消息开始使用
-5. 群聊中需要 @机器人 才会响应
+#### Telegram 平台
 
-### 从源码构建
+1. 通过 [@BotFather](https://t.me/BotFather) 创建 Bot，获取 Token
+2. 配置：
 
 ```bash
-git clone https://github.com/congqiu/cc-im.git
-cd cc-im
-pnpm install
-cp .env.example .env
-# 编辑 .env 填入对应平台凭证
+export TELEGRAM_BOT_TOKEN=your_bot_token
+npx cc-im@latest
+```
 
-pnpm dev      # 开发模式
-pnpm build    # 编译
-pnpm start    # 生产模式（前台）
+3. 在 Telegram 中找到 Bot，发送 `/start` 开始使用
+
+### 同时运行多个平台
+
+```bash
+export FEISHU_APP_ID=xxx
+export FEISHU_APP_SECRET=xxx
+export TELEGRAM_BOT_TOKEN=xxx
+export WECOM_BOT_ID=xxx
+export WECOM_BOT_SECRET=xxx
+npx cc-im@latest
 ```
 
 ### 守护进程模式
 
 ```bash
-# 后台启动
-cc-im -d
-
-# 停止服务
-cc-im stop
-
-# 查看运行状态
-cc-im status
+cc-im -d        # 后台启动
+cc-im stop      # 停止服务
+cc-im status    # 查看运行状态
 ```
 
-日志输出到 `~/.cc-im/logs/daemon.log`。
-
-### Windows 快捷脚本
-
-运行 `cc-im setup` 后会自动生成快捷脚本到 `~/.cc-im/`：
-
-| 脚本 | 说明 |
-|------|------|
-| `启动.bat` | 启动服务（前台） |
-| `停止.bat` | 停止服务 |
-| `重启.bat` | 重启服务 |
-| `状态.bat` | 查看运行状态 |
-| `启动.ps1` | PowerShell 启动 |
-| `停止.ps1` | PowerShell 停止 |
-
-双击即可运行，无需打开终端。
-
-### 开机自启（systemd）
-
-在 Linux 上可注册为用户级 systemd 服务，开机自动启动：
+### 开机自启（Linux systemd）
 
 ```bash
-# 注册并启动服务
-cc-im install
-
-# 卸载服务
-cc-im uninstall
+cc-im install   # 注册并启动服务
+cc-im uninstall # 卸载服务
 ```
 
 ## 命令列表
@@ -304,15 +296,19 @@ cc-im uninstall
 
 ## 应用数据目录
 
-默认数据目录：`~/.cc-im`（常量 `APP_HOME`）
+默认数据目录：`~/.cc-im`
 
 ```
 ~/.cc-im/
 ├── config.json          # 配置文件
+├── 启动.bat             # Windows 快捷启动脚本
+├── 停止.bat             # Windows 快捷停止脚本
+├── 重启.bat             # Windows 快捷重启脚本
+├── channel-registry.json # Channel 模式客户端注册表
 ├── data/
 │   ├── sessions.json    # 会话持久化数据
 │   └── active-chats.json # 活跃聊天记录（生命周期通知）
-└── logs/                # 日志文件（可通过 LOG_DIR 自定义）
+└── logs/                # 日志文件
     ├── 2026-02-14.log
     └── 2026-02-15.log
 ```
@@ -347,6 +343,8 @@ cc-im uninstall
 
 配置修改后需要完全退出 Claude Code 会话（`exit`）并重新启动才能生效。
 
+> 提示：运行 `cc-im setup` 可自动配置 Hook，无需手动编辑。
+
 ### 工作流程
 
 当 `CLAUDE_SKIP_PERMISSIONS=false` 时，系统会通过 PreToolUse Hook 拦截敏感操作：
@@ -360,15 +358,56 @@ cc-im uninstall
 以下只读工具会自动放行，无需确认：
 `Read`、`Glob`、`Grep`、`WebFetch`、`WebSearch`、`Task`、`TodoRead`
 
+## 在其他电脑上复刻
+
+### 从 GitHub 克隆安装
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/staro1314/claude-code-cc-im.git
+cd cc-im
+
+# 2. 安装依赖并构建
+npm install
+npm run build
+
+# 3. 全局链接（可选，让 cc-im 命令全局可用）
+npm link
+
+# 4. 配置
+cc-im setup
+# 按提示选择平台、填写凭证
+
+# 5. 启动
+# Windows：双击 ~/.cc-im/启动.bat
+# Linux/Mac：cc-im 或 npx cc-im@latest
+```
+
+### 从 npm 安装
+
+```bash
+npm install -g cc-im
+cc-im setup
+# 双击 ~/.cc-im/启动.bat（Windows）
+```
+
+### 需要同步的配置
+
+在新电脑上需要重新配置：
+
+1. **企业微信凭证**：`~/.cc-im/config.json` 中的 `wecomBotId` 和 `wecomBotSecret`
+2. **Claude Code CLI**：确保已安装且在 PATH 中
+3. **工作目录**：`claudeWorkDir` 指向你的项目目录
+4. **Claude Hook**：`~/.claude/settings.json` 中的 PreToolUse hook 配置
+
 ## 项目结构
 
 ```
 src/
 ├── index.ts                  # 入口，多平台并行初始化
 ├── config.ts                 # 配置加载（环境变量 + ~/.cc-im/config.json）
-├── constants.ts              # 系统常量（节流、长度限制、错误码等）
+├── constants.ts              # 系统常量
 ├── logger.ts                 # 带标签的日志系统（自动脱敏）
-├── sanitize.ts               # 日志脱敏规则
 ├── cli.ts                    # CLI 入口（前台/守护进程/systemd 服务管理）
 ├── access/
 │   └── access-control.ts     # 白名单访问控制
@@ -382,7 +421,7 @@ src/
 │   ├── client.ts             # 飞书 SDK 初始化
 │   ├── event-handler.ts      # 飞书事件处理
 │   ├── message-sender.ts     # 飞书消息发送封装
-│   ├── card-builder.ts       # 飞书卡片构建（JSON 1.0 + 2.0）
+│   ├── card-builder.ts       # 飞书卡片构建
 │   └── cardkit-manager.ts    # CardKit 卡片生命周期管理
 ├── telegram/
 │   ├── client.ts             # Telegraf 初始化
@@ -391,25 +430,33 @@ src/
 ├── wecom/
 │   ├── client.ts             # 企业微信 WSClient 初始化
 │   ├── event-handler.ts      # 企业微信事件处理
-│   └── message-sender.ts     # 企业微信消息发送（流式回复、权限卡片）
+│   └── message-sender.ts     # 企业微信消息发送
+├── channel/
+│   ├── index.js              # Channel 模式入口
+│   ├── bridge-server.js      # HTTP 桥接服务
+│   ├── wechat-channel.js     # 企业微信 Channel MCP 服务器
+│   ├── channel-registry.js   # 多客户端注册表
+│   └── wecom-channel-handler.js # 企业微信 Channel 事件处理
 ├── hook/
-│   ├── permission-server.ts  # 权限确认 HTTP 服务 + 监控通知端点
+│   ├── permission-server.ts  # 权限确认 HTTP 服务
 │   ├── hook-script.ts        # Claude Code PreToolUse Hook
-│   ├── watch-script.ts       # Claude Code 监控 Hook（PostToolUse/Stop 等）
-│   ├── watch.ts              # 监控状态管理与消息格式化
+│   ├── watch-script.ts       # 监控 Hook
+│   ├── watch.ts              # 监控状态管理
 │   └── ensure-hook.ts        # Hook 自动配置
 ├── shared/
-│   ├── active-chats.ts          # 活跃聊天记录（生命周期通知）
-│   ├── claude-task.ts           # 共享 Claude 任务执行层（节流、统计、竞态保护）
-│   ├── history.ts               # 会话历史读取与分页
-│   ├── message-dedup.ts         # 消息去重（飞书重复事件过滤）
-│   ├── retry.ts                 # 通用重试工具
-│   ├── task-cleanup.ts          # 超时任务自动清理
-│   ├── types.ts                 # 共享类型定义
-│   ├── update-check.ts          # 启动时版本更新检查
-│   └── utils.ts                 # 共享工具函数
+│   ├── active-chats.ts       # 活跃聊天记录
+│   ├── claude-task.ts        # 共享 Claude 任务执行层
+│   ├── history.ts            # 会话历史
+│   ├── message-dedup.ts      # 消息去重
+│   ├── update-check.ts       # 版本更新检查
+│   └── utils.ts              # 共享工具函数
 ├── session/
-│   └── session-manager.ts    # 会话管理（持久化到 data/sessions.json）
+│   └── session-manager.ts    # 会话管理
+├── setup/
+│   ├── detect.js             # 环境检测
+│   ├── prompts.js            # 交互式提示
+│   ├── shortcuts.js          # 快捷脚本生成
+│   └── wizard.js             # 配置向导
 └── queue/
     └── request-queue.ts      # 请求队列与并发控制
 ```
@@ -421,10 +468,8 @@ src/
 确保已安装 Claude Code CLI 且在 PATH 中：
 
 ```bash
-# 检查是否安装
 claude --version
-
-# 如果未安装
+# 如果未安装：
 npm install -g @anthropic-ai/claude-code
 ```
 
@@ -436,6 +481,19 @@ npm install -g @anthropic-ai/claude-code
 
 检查 `~/.claude/settings.json` 中的 hooks 配置是否正确。运行 `cc-im setup` 可自动配置。
 
+### Q: Channel 模式下 Claude CLI 窗口没关闭？
+
+停止脚本会自动杀掉所有相关进程（Claude CLI、cc-im 服务、MCP 服务器）。如果仍有残留，手动执行：
+
+```bash
+# Windows
+taskkill /FI "WINDOWTITLE eq Claude Code*" /F
+taskkill /FI "WINDOWTITLE eq CC-IM*" /F
+
+# 清理注册表
+del "%USERPROFILE%\.cc-im\channel-registry.json"
+```
+
 ### Q: 如何更新到最新版本？
 
 ```bash
@@ -445,10 +503,7 @@ npm update -g cc-im
 ### Q: 如何查看日志？
 
 ```bash
-# 日志目录
 ls ~/.cc-im/logs/
-
-# 实时查看
 tail -f ~/.cc-im/logs/$(date +%Y-%m-%d).log
 ```
 

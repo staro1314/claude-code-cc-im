@@ -33,6 +33,9 @@ const log = createLogger('Bridge');
  * @returns {Promise<{port: number, close: () => Promise<void>}>}
  */
 export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission }) {
+  // Track the last active chat_id for permission relay
+  let lastChatId = '';
+
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
       res.setHeader('Content-Type', 'application/json');
@@ -53,6 +56,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             res.end(JSON.stringify({ error: 'chat_id and text required' }));
             return;
           }
+          lastChatId = chat_id;
           log.debug(`Channel reply → chat_id=${chat_id}, len=${text.length}`);
           await sendTextReply(chat_id, text);
           res.writeHead(200);
@@ -70,11 +74,14 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         try {
           const body = await readBody(req);
           const { request_id, tool_name, description, input_preview } = body;
-          log.info(`Permission relay: ${tool_name} (${request_id})`);
-          // Send permission card to the most recent active chat
-          // The channel server should include chat_id in meta
-          // For now, use a generic approach
-          await sendPermissionCard(body.chat_id || '', request_id, tool_name, {});
+          const chatId = body.chat_id || lastChatId;
+          log.info(`Permission relay: ${tool_name} (${request_id}) → chat=${chatId}`);
+          if (chatId) {
+            await sendPermissionCard(chatId, request_id, tool_name, body);
+            log.info(`Permission card sent to chat=${chatId}`);
+          } else {
+            log.warn('Permission relay: no chat_id available');
+          }
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {

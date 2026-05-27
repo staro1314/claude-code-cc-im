@@ -64,8 +64,17 @@ export async function runChannel() {
             await sendTextReply(chatId, text);
         },
         sendPermissionCard: async (chatId, requestId, toolName, toolInput) => {
-            // Permission card sending is handled by the channel handler
-            log.debug(`Permission card request: ${toolName} (${requestId})`);
+            // Dynamically import to avoid circular deps
+            const { createWecomSender } = await import('../wecom/message-sender.js');
+            const { initWecom: getWecomClient } = await import('../wecom/client.js');
+            // Use the wsClient that's already connected
+            if (wecomWsClient) {
+                const sender = createWecomSender(wecomWsClient);
+                await sender.sendPermissionCard(chatId, requestId, toolName, toolInput);
+                log.info(`Permission card sent: ${toolName} (${requestId}) to ${chatId}`);
+            } else {
+                log.warn(`Cannot send permission card: WeChat Work client not available`);
+            }
         },
         resolvePermission: (requestId, decision) => {
             const { resolvePermissionById } = require('../hook/permission-server.js');
@@ -84,8 +93,10 @@ export async function runChannel() {
 
     // Initialize WeChat Work in channel mode
     let wecomHandle = null;
+    let wecomWsClient = null;
     try {
         await initWecom(config, (wsClient) => {
+            wecomWsClient = wsClient;
             wecomHandle = setupWecomChannelHandlers(wsClient, config, null, {});
             return wecomHandle;
         });

@@ -38,6 +38,8 @@ const CLIENT_ID = `claude-${randomBytes(4).toString('hex')}`;
 // --- State ---
 /** @type {Map<string, {resolve: (decision: string) => void, timer: NodeJS.Timeout}>} */
 const pendingPermissions = new Map();
+/** Track last active chat_id for permission relay */
+let lastChatId = '';
 
 // --- MCP Server ---
 const mcp = new Server(
@@ -52,11 +54,13 @@ const mcp = new Server(
     },
     instructions: [
       'You are connected to WeChat Work (企业微信) through a channel bridge.',
-      'Messages arrive as <channel source="wechat-work" chat_id="..." user_id="..." platform="wecom">message content</channel>.',
-      'Reply to messages using the "reply" tool, passing the chat_id from the channel tag.',
+      'When you receive a message from WeChat Work, you MUST respond using the "reply" tool.',
+      'The message includes a chat_id parameter - use this exact chat_id when calling the reply tool.',
+      'Example: reply(chat_id="xxx", text="your response")',
       'For permission requests, use the "permission" tool with request_id and decision (allow/deny).',
       'Always reply in the same language as the incoming message.',
       'Keep responses concise and helpful.',
+      'IMPORTANT: Never ignore a WeChat Work message. Always use the reply tool to respond.',
     ].join('\n'),
   },
 );
@@ -148,7 +152,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
       await fetch(`http://127.0.0.1:${BRIDGE_PORT}/permission-relay`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_id, tool_name, description, input_preview }),
+        body: JSON.stringify({ request_id, tool_name, description, input_preview, chat_id: lastChatId }),
       });
     } catch (err) {
       log(`Failed to relay permission to cc-im: ${err.message}`);
@@ -182,11 +186,17 @@ function startHttpServer(port) {
             return;
           }
 
+          lastChatId = chat_id;
+
           // Push message into Claude Code session
+          // Use structured notification with explicit reply instructions
+          const channelTag = `<channel source="wechat-work" chat_id="${chat_id}" user_id="${user_id || ''}" platform="wecom">${content}</channel>`;
+          const promptMessage = `[WeChat Work Message]\n${channelTag}\n\nYou MUST use the "reply" tool to respond. Pass chat_id="${chat_id}" and your response text.`;
+
           await mcp.notification({
             method: 'notifications/claude/channel',
             params: {
-              content,
+              content: promptMessage,
               meta: {
                 chat_id,
                 user_id: user_id || '',
