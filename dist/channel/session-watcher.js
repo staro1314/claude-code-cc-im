@@ -1,43 +1,38 @@
 /**
  * Session File Watcher
  *
- * Monitors the ACTIVE Claude Code session JSONL file for thinking events
+ * Monitors ALL Claude Code session JSONL files for thinking events
  * and pushes them to the bridge server in real-time.
  *
- * Only watches the file identified by ~/.cc-im/active-transcript
- * (written by hook-script.js) to prevent cross-talk between sessions.
+ * Thinking events have unique UUIDs for deduplication.
+ * Also manages the heartbeat (loading indicator) for active sessions.
  */
 import { watch, readFileSync } from 'node:fs';
-import { stat, open } from 'node:fs/promises';
+import { readdir, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('SessionWatcher');
-const APP_HOME = join(homedir(), '.cc-im');
-const ACTIVE_TRANSCRIPT_FILE = join(APP_HOME, 'active-transcript');
+const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
 export class SessionWatcher {
-  /** @type {string|null} absolute path to the target session file */
-  #targetFile = null;
-  /** @type {number} last known file size of target */
-  #lastSize = 0;
-  /** @type {Set<string>} UUIDs of already-sent thinking events */
+  /** @type {Map<string, number>} filePath → last known file size */
+  #fileSizes = new Map();
+  /** @type {Set<string>} UUIDs of already-sent events (thinking + tool calls) */
   #sentUuids = new Set();
   /** @type {import('node:fs').FSWatcher | null} */
   #watcher = null;
   /** @type {NodeJS.Timeout | null} */
-  #pollTimer = null;
+  #scanTimer = null;
   /** @type {string} bridge server URL */
   #bridgeUrl;
   /** @type {string} chat_id for WeChat Work */
   #chatId;
   #maxSentUuids = 5000;
-  /** @type {NodeJS.Timeout | null} heartbeat timer */
+  /** @type {NodeJS.Timeout | null} */
   #heartbeatTimer = null;
-  /** @type {number} last time session file was modified */
   #lastActivityTime = 0;
-  /** @type {number} heartbeat interval in ms */
   #heartbeatInterval = 30_000;
 
   constructor({ bridgeUrl, chatId }) {
@@ -45,32 +40,26 @@ export class SessionWatcher {
     this.#chatId = chatId;
   }
 
-  /**
-   * Start watching. Reads active-transcript to find the target file.
-   */
   async start() {
-    // Try to read the target file path from hook-script's output
-    this.#loadTargetFile();
-
-    // Poll for target file changes (new sessions, new hook invocations)
-    this.#pollTimer = setInterval(() => this.#loadTargetFile(), 5000);
-    this.#pollTimer.unref();
-
-    // If we have a target, start watching it
-    if (this.#targetFile) {
-      this.#watchTarget();
+    log.info(`Watching all session files in ${PROJECTS_DIR}`);
+    await this.#scanAllFiles();
+    try {
+      this.#watcher = watch(PROJECTS_DIR, { recursive: true }, (eventType, filename) => {
+        if (!filename || !filename.endsWith('.jsonl')) return;
+        this.#scheduleRead(join(PROJECTS_DIR, filename));
+      });
+      log.info('Session file watcher started');
+    } catch (err) {
+      log.warn('Failed to watch, using scan fallback:', err.message);
+      this.#scanTimer = setInterval(() => this.#scanAllFiles(), 3000);
     }
-
-    log.info(`Session watcher started (target: ${this.#targetFile ?? 'waiting for first hook invocation'})`);
   }
 
-  setChatId(chatId) {
-    this.#chatId = chatId;
-  }
+  setChatId(chatId) { this.#chatId = chatId; }
 
   stop() {
     if (this.#watcher) { this.#watcher.close(); this.#watcher = null; }
-    if (this.#pollTimer) { clearInterval(this.#pollTimer); this.#pollTimer = null; }
+    if (this.#scanTimer) { clearInterval(this.#scanTimer); this.#scanTimer = null; }
     this.#clearHeartbeat();
     this.#sentUuids.clear();
     log.info('Session watcher stopped');
@@ -82,154 +71,111 @@ export class SessionWatcher {
 
   #startHeartbeat() {
     this.#lastActivityTime = Date.now();
-    if (this.#heartbeatTimer) return; // already running
-    // 首次立即发送心跳
+    if (this.#heartbeatTimer) return;
     this.#sendHeartbeat(0);
-    // 之后每 30 秒更新
     this.#heartbeatTimer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - this.#lastActivityTime) / 1000);
-      if (elapsed > 60) {
-        // 超过 60 秒无活动，模型空闲，发送完成并停止
-        this.#sendHeartbeatDone();
-        this.#clearHeartbeat();
-        return;
-      }
+      if (elapsed > 60) { this.#sendHeartbeatDone(); this.#clearHeartbeat(); return; }
       this.#sendHeartbeat(elapsed);
     }, this.#heartbeatInterval);
     this.#heartbeatTimer.unref();
   }
 
-  async #sendHeartbeat(elapsedSec) {
-    if (!this.#chatId) return;
-    const elapsed = elapsedSec ?? Math.floor((Date.now() - this.#lastActivityTime) / 1000);
-    const notification = `⏳ 模型处理中... (${elapsed}s)`;
-    try {
-      await fetch(`${this.#bridgeUrl}/tool-event`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'heartbeat', notification }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch { /* ignore */ }
+  /** @type {Map<string, NodeJS.Timeout>} */
+  #pendingReads = new Map();
+
+  #scheduleRead(filePath) {
+    const existing = this.#pendingReads.get(filePath);
+    if (existing) clearTimeout(existing);
+    this.#pendingReads.set(filePath, setTimeout(() => {
+      this.#pendingReads.delete(filePath);
+      this.#readNewLines(filePath).catch(() => {});
+    }, 200));
   }
 
-  async #sendHeartbeatDone() {
-    if (!this.#chatId) return;
+  async #scanAllFiles() {
     try {
-      await fetch(`${this.#bridgeUrl}/tool-event`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'heartbeat-done', notification: '✅ 模型处理完成' }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch { /* ignore */ }
-  }
-
-  /**
-   * Read active-transcript file to get/update the target session file path.
-   */
-  #loadTargetFile() {
-    try {
-      const newPath = readFileSync(ACTIVE_TRANSCRIPT_FILE, 'utf-8').trim();
-      if (newPath && newPath !== this.#targetFile) {
-        // Target changed — reset size tracking and re-watch
-        this.#targetFile = newPath;
-        this.#lastSize = 0;
-        this.#sentUuids.clear();
-        this.#watchTarget();
-        log.info(`Session target updated: ${newPath}`);
+      const dirs = await readdir(PROJECTS_DIR, { withFileTypes: true });
+      for (const dir of dirs) {
+        if (!dir.isDirectory()) continue;
+        const dirPath = join(PROJECTS_DIR, dir.name);
+        try {
+          const files = await readdir(dirPath);
+          for (const file of files) {
+            if (!file.endsWith('.jsonl')) continue;
+            const filePath = join(dirPath, file);
+            try {
+              const s = await stat(filePath);
+              this.#fileSizes.set(filePath, s.size);
+            } catch { /* deleted */ }
+          }
+        } catch { /* permission */ }
       }
-    } catch {
-      // File doesn't exist yet — wait for hook-script to create it
-    }
+    } catch (err) { log.debug('Scan error:', err); }
   }
 
-  /**
-   * Start or restart fs.watch on the target file.
-   */
-  #watchTarget() {
-    if (!this.#targetFile) return;
-    if (this.#watcher) { this.#watcher.close(); this.#watcher = null; }
-
-    try {
-      this.#watcher = watch(this.#targetFile, () => {
-        this.#readNewLines().catch(() => {});
-      });
-      this.#watcher.on('error', () => {
-        // File might have been recreated — will be picked up by pollTimer
-        this.#watcher = null;
-      });
-      log.debug(`Watching: ${this.#targetFile}`);
-    } catch (err) {
-      log.debug(`Watch setup failed for ${this.#targetFile}: ${err.message}`);
-    }
-  }
-
-  /**
-   * Read new lines from the target file and extract thinking events.
-   */
-  async #readNewLines() {
-    if (!this.#targetFile) return;
+  async #readNewLines(filePath) {
+    const lastSize = this.#fileSizes.get(filePath) ?? 0;
     let currentSize;
-    try {
-      const s = await stat(this.#targetFile);
-      currentSize = s.size;
-    } catch { return; }
+    try { const s = await stat(filePath); currentSize = s.size; } catch { return; }
+    if (currentSize <= lastSize) return;
 
-    if (currentSize <= this.#lastSize) return;
-
-    // 文件有新内容 → 模型在活跃，启动/刷新心跳
     this.#startHeartbeat();
 
     let fh;
     try {
-      fh = await open(this.#targetFile, 'r');
-      const buf = Buffer.alloc(currentSize - this.#lastSize);
-      await fh.read(buf, 0, buf.length, this.#lastSize);
-      this.#lastSize = currentSize;
-
+      fh = await open(filePath, 'r');
+      const buf = Buffer.alloc(currentSize - lastSize);
+      await fh.read(buf, 0, buf.length, lastSize);
+      this.#fileSizes.set(filePath, currentSize);
       const lines = buf.toString('utf-8').split('\n');
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          if (event.type === 'thinking' && event.uuid) {
+          if (event.type === 'thinking' && event.uuid && !this.#sentUuids.has(event.uuid)) {
             await this.#handleThinkingEvent(event);
           }
-        } catch { /* skip malformed lines */ }
+        } catch { /* malformed */ }
       }
-    } catch (err) {
-      log.debug(`Read error: ${err.message}`);
-    } finally {
-      await fh?.close();
-    }
+    } catch (err) { log.debug(`Read error: ${err.message}`); }
+    finally { await fh?.close(); }
   }
 
   async #handleThinkingEvent(event) {
-    if (this.#sentUuids.has(event.uuid)) return;
     this.#sentUuids.add(event.uuid);
     if (this.#sentUuids.size > this.#maxSentUuids) {
       const first = this.#sentUuids.values().next().value;
       if (first !== undefined) this.#sentUuids.delete(first);
     }
-
     const thinking = event.message?.content?.[0]?.thinking;
     if (!thinking) return;
-
     const elapsed = event.timestamp
       ? ` (${new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })})`
       : '';
-
     const maxLen = 500;
     const truncated = thinking.length > maxLen ? thinking.slice(0, maxLen) + '...' : thinking;
     const notification = `🧠 **模型思考**${elapsed}\n\n${truncated}`;
+    await this.#push(notification);
+  }
 
+  async #sendHeartbeat(elapsedSec) {
+    if (!this.#chatId) return;
+    const elapsed = elapsedSec ?? Math.floor((Date.now() - this.#lastActivityTime) / 1000);
+    await this.#push(`⏳ 模型处理中... (${elapsed}s)`, 'heartbeat');
+  }
+
+  async #sendHeartbeatDone() {
+    await this.#push('✅ 模型处理完成', 'heartbeat-done');
+  }
+
+  async #push(notification, toolName = 'thinking') {
     if (!this.#chatId) return;
     try {
       await fetch(`${this.#bridgeUrl}/tool-event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'thinking', notification }),
+        body: JSON.stringify({ chat_id: this.#chatId, tool_name: toolName, notification }),
         signal: AbortSignal.timeout(3000),
       });
     } catch { /* ignore */ }
