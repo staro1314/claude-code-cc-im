@@ -51,30 +51,34 @@ function isPushMode() {
 }
 
 /**
- * 处理 /wecom on|off 命令，切换推送模式
- * @returns true 表示已处理（应跳过正常流程）
+ * 检测 Bash 命令中的 wecom-mode 文件操作，自动切换推送模式
+ * 用户说"打开企业微信推送"→ Claude 执行 touch 命令 → hook 拦截并创建文件
+ * @returns true 表示已处理（放行命令但不走正常流程）
  */
-function handleWecomCommand(text) {
-    if (text === '/wecom on') {
+function handleWecomCommand(command) {
+    const wecomModePath = join(homedir(), '.cc-im', 'wecom-mode');
+    const normalized = command.replace(/\\/g, '/');
+
+    // 检测创建 wecom-mode 的命令（touch、echo >、mkdir + touch 等）
+    if (normalized.includes('wecom-mode') && !normalized.includes('rm ') && !normalized.includes('del ')) {
         try {
             mkdirSync(join(homedir(), '.cc-im'), { recursive: true });
-            writeFileSync(join(homedir(), '.cc-im', 'wecom-mode'), String(Date.now()), 'utf-8');
-            process.stderr.write('[cc-im] Push mode ON\n');
+            writeFileSync(wecomModePath, String(Date.now()), 'utf-8');
+            process.stderr.write('[cc-im] Push mode ON (auto-detected)\n');
         } catch { /* ignore */ }
-        process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
-        process.exit(HOOK_EXIT_CODES.SUCCESS);
-        return true;
+        return false; // 放行命令，让 Claude 继续执行
     }
-    if (text === '/wecom off') {
+
+    // 检测删除 wecom-mode 的命令
+    if (normalized.includes('wecom-mode') && (normalized.includes('rm ') || normalized.includes('del '))) {
         try {
             const { unlinkSync } = require('node:fs');
-            unlinkSync(join(homedir(), '.cc-im', 'wecom-mode'));
-            process.stderr.write('[cc-im] Push mode OFF\n');
+            unlinkSync(wecomModePath);
+            process.stderr.write('[cc-im] Push mode OFF (auto-detected)\n');
         } catch { /* ignore */ }
-        process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
-        process.exit(HOOK_EXIT_CODES.SUCCESS);
-        return true;
+        return false; // 放行命令
     }
+
     return false;
 }
 
@@ -191,9 +195,9 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
-    // 处理 /wecom on|off 命令（通过 Bash 工具的 command 参数检测）
+    // 检测 Bash 命令中的 wecom-mode 文件操作，自动切换推送模式
     if (toolName === 'Bash' && typeof toolInput.command === 'string') {
-        if (handleWecomCommand(toolInput.command.trim())) return;
+        handleWecomCommand(toolInput.command);
     }
     // 推送模式下：写入 transcript_path 并推送通知
     if (isPushMode()) {
