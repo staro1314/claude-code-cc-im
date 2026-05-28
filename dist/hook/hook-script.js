@@ -40,12 +40,15 @@ function resolveChatId() {
 }
 
 /**
- * 判断是否为 channel 模式（通过标记文件）
+ * 判断是否为 channel 模式（通过标记文件的时效性判断）
+ * 文件内容是创建时间戳，超过 30 秒视为过期，防止残留文件导致误判
  */
 function isChannelMode() {
     try {
-        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
-        return true;
+        const content = readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8').trim();
+        const createdAt = parseInt(content, 10);
+        if (!createdAt) return false;
+        return (Date.now() - createdAt) < 30_000;
     } catch { return false; }
 }
 

@@ -15,8 +15,10 @@ import { homedir } from 'node:os';
 
 function isChannelMode() {
     try {
-        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
-        return true;
+        const content = readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8').trim();
+        const createdAt = parseInt(content, 10);
+        if (!createdAt) return false;
+        return (Date.now() - createdAt) < 30_000;
     } catch { return false; }
 }
 

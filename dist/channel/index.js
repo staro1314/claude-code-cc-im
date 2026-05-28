@@ -120,8 +120,12 @@ export async function runChannel() {
     const appHome = join(homedir(), '.cc-im');
     mkdirSync(appHome, { recursive: true });
     writeFileSync(join(appHome, 'bridge-port'), String(bridgeServer.port), 'utf-8');
-    // 创建 channel-active 标记文件，供 hook-script 判断是否为 channel 模式
+    // 创建并持续刷新 channel-active 标记文件（hook-script 通过时间戳判断是否为 channel 模式）
     writeFileSync(join(appHome, 'channel-active'), String(Date.now()), 'utf-8');
+    const channelActiveRefresh = setInterval(() => {
+        try { writeFileSync(join(appHome, 'channel-active'), String(Date.now()), 'utf-8'); } catch { /* ignore */ }
+    }, 10_000);
+    channelActiveRefresh.unref();
 
     // Initialize WeChat Work in channel mode
     let wecomHandle = null;
@@ -173,7 +177,8 @@ export async function runChannel() {
         if (shuttingDown) return;
         shuttingDown = true;
         log.info('Shutting down channel service...');
-        // 删除 channel-active 标记文件
+        // 删除 channel-active 标记文件并停止刷新
+        clearInterval(channelActiveRefresh);
         try { unlinkSync(join(homedir(), '.cc-im', 'channel-active')); } catch { /* ignore */ }
         sessionWatcher.stop();
         wecomHandle?.stop();
