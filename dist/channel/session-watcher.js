@@ -128,24 +128,28 @@ export class SessionWatcher {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          if (event.type === 'thinking' && event.uuid && !this.#sentUuids.has(event.uuid)) {
-            thinkingFound++;
-            await this.#handleThinkingEvent(event);
+          // Thinking 在 type=assistant 消息的 content 块里
+          if (event.type === 'assistant' && event.uuid && !this.#sentUuids.has(event.uuid)) {
+            const thinking = event.message?.content?.find?.(b => b.type === 'thinking')?.thinking;
+            if (thinking) {
+              thinkingFound++;
+              await this.#handleThinkingEvent(event, thinking);
+            }
           }
         } catch { /* malformed */ }
       }
-      if (thinkingFound > 0) log.info(`Pushed ${thinkingFound} thinking events from ${filePath.split(/[\\/]/).pop()}`);
+      if (thinkingFound > 0) log.info(`Pushed ${thinkingFound} thinking events`);
     } catch (err) { log.debug(`Read error: ${err.message}`); }
     finally { await fh?.close(); }
   }
 
-  async #handleThinkingEvent(event) {
+  async #handleThinkingEvent(event, thinkingText) {
     this.#sentUuids.add(event.uuid);
     if (this.#sentUuids.size > this.#maxSentUuids) {
       const first = this.#sentUuids.values().next().value;
       if (first !== undefined) this.#sentUuids.delete(first);
     }
-    const thinking = event.message?.content?.[0]?.thinking;
+    const thinking = thinkingText || event.message?.content?.find?.(b => b.type === 'thinking')?.thinking;
     if (!thinking) return;
     const elapsed = event.timestamp
       ? ` (${new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })})`
