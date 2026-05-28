@@ -32,19 +32,21 @@ function formatResult(toolName, result) {
 
 function notifyToolResult(chatId, toolName, result) {
     const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT ?? '18790', 10);
-    if (!bridgePort || !chatId) return;
+    if (!bridgePort || !chatId) return Promise.resolve();
     const detail = formatResult(toolName, result);
     const notification = `✅ ${toolName} 完成${detail}`;
     const payload = JSON.stringify({ chat_id: chatId, tool_name: toolName, notification });
-    const req = request({
-        hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-        timeout: 3000,
-    }, () => {});
-    req.on('error', () => {});
-    req.on('timeout', () => req.destroy());
-    req.write(payload);
-    req.end();
+    return new Promise((resolve) => {
+        const req = request({
+            hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+            timeout: 3000,
+        }, () => { resolve(); });
+        req.on('error', () => { resolve(); });
+        req.on('timeout', () => { req.destroy(); resolve(); });
+        req.write(payload);
+        req.end();
+    });
 }
 
 async function main() {
@@ -65,7 +67,7 @@ async function main() {
 
     const toolName = input.tool_name ?? 'unknown';
     const result = input.tool_response;
-    notifyToolResult(chatId, toolName, result);
+    await notifyToolResult(chatId, toolName, result);
 }
 
 const isDirectRun = process.argv[1]?.endsWith('post-hook-script.js');

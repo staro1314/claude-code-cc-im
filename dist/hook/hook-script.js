@@ -19,7 +19,7 @@
  *   2 - Permission server unreachable (deny decision written to stdout)
  */
 import { request } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { READ_ONLY_TOOLS, HOOK_EXIT_CODES } from '../constants.js';
@@ -37,6 +37,18 @@ function resolveChatId() {
     } catch {
         return '';
     }
+}
+
+/**
+ * 将当前会话的 transcript_path 写入文件，供 SessionWatcher 定位正确的 session 文件
+ */
+function writeTranscriptPath(transcriptPath) {
+    if (!transcriptPath) return;
+    try {
+        const dir = join(homedir(), '.cc-im');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'active-transcript'), transcriptPath, 'utf-8');
+    } catch { /* ignore */ }
 }
 
 function getToolEmoji(name) {
@@ -61,16 +73,18 @@ function formatToolDetail(name, input) {
 }
 function notifyToolUse(chatId, toolName, toolInput) {
     const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT ?? '18790', 10);
-    if (!bridgePort || !chatId) return;
+    if (!bridgePort || !chatId) return Promise.resolve();
     const emoji = getToolEmoji(toolName);
     const detail = formatToolDetail(toolName, toolInput);
     const notification = `${emoji} ${toolName}${detail}`;
     const payload = JSON.stringify({ chat_id: chatId, tool_name: toolName, notification });
-    const req = request({ hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 3000 }, () => {});
-    req.on('error', () => {});
-    req.on('timeout', () => req.destroy());
-    req.write(payload);
-    req.end();
+    return new Promise((resolve) => {
+        const req = request({ hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 3000 }, () => { resolve(); });
+        req.on('error', () => { resolve(); });
+        req.on('timeout', () => { req.destroy(); resolve(); });
+        req.write(payload);
+        req.end();
+    });
 }
 function readStdin() {
     return new Promise((resolve) => {
@@ -138,8 +152,10 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
-    // 立即推送工具调用通知（不等权限结果，确保实时性）
-    notifyToolUse(chatId, toolName, toolInput);
+    // 记录当前会话的 transcript_path，供 SessionWatcher 定位正确的 session 文件（防窜台）
+    writeTranscriptPath(input.transcript_path);
+    // 推送工具调用通知（await 确保 HTTP 请求完成后再退出）
+    await notifyToolUse(chatId, toolName, toolInput);
     // Skip permission check for read-only tools - allow immediately
     if (READ_ONLY_TOOLS.includes(toolName)) {
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
@@ -149,6 +165,7 @@ async function main() {
     // 新版 Claude Code 的 --dangerously-skip-permissions 不再跳过 hooks，
     // 需要通过环境变量让 hook 脚本自行放行
     if (process.env.CC_IM_SKIP_PERMISSIONS === '1') {
+        await notifyToolUse(chatId, toolName, toolInput);
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
         process.exit(HOOK_EXIT_CODES.SUCCESS);
     }
