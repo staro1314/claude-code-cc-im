@@ -40,16 +40,42 @@ function resolveChatId() {
 }
 
 /**
- * 判断是否为 channel 模式（通过标记文件的时效性判断）
- * 文件内容是创建时间戳，超过 30 秒视为过期，防止残留文件导致误判
+ * 判断是否为推送模式（通过 wecom-mode 标记文件）
+ * 启动脚本创建此文件，/wecom off 删除，/wecom on 恢复
  */
-function isChannelMode() {
+function isPushMode() {
     try {
-        const content = readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8').trim();
-        const createdAt = parseInt(content, 10);
-        if (!createdAt) return false;
-        return (Date.now() - createdAt) < 30_000;
+        readFileSync(join(homedir(), '.cc-im', 'wecom-mode'), 'utf-8');
+        return true;
     } catch { return false; }
+}
+
+/**
+ * 处理 /wecom on|off 命令，切换推送模式
+ * @returns true 表示已处理（应跳过正常流程）
+ */
+function handleWecomCommand(text) {
+    if (text === '/wecom on') {
+        try {
+            mkdirSync(join(homedir(), '.cc-im'), { recursive: true });
+            writeFileSync(join(homedir(), '.cc-im', 'wecom-mode'), String(Date.now()), 'utf-8');
+            process.stderr.write('[cc-im] Push mode ON\n');
+        } catch { /* ignore */ }
+        process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
+        process.exit(HOOK_EXIT_CODES.SUCCESS);
+        return true;
+    }
+    if (text === '/wecom off') {
+        try {
+            const { unlinkSync } = require('node:fs');
+            unlinkSync(join(homedir(), '.cc-im', 'wecom-mode'));
+            process.stderr.write('[cc-im] Push mode OFF\n');
+        } catch { /* ignore */ }
+        process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
+        process.exit(HOOK_EXIT_CODES.SUCCESS);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -165,8 +191,12 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
-    // 仅 channel 模式写入 transcript_path 并推送通知
-    if (isChannelMode()) {
+    // 处理 /wecom on|off 命令（通过 Bash 工具的 command 参数检测）
+    if (toolName === 'Bash' && typeof toolInput.command === 'string') {
+        if (handleWecomCommand(toolInput.command.trim())) return;
+    }
+    // 推送模式下：写入 transcript_path 并推送通知
+    if (isPushMode()) {
         writeTranscriptPath(input.transcript_path);
         await notifyToolUse(chatId, toolName, toolInput);
     }
@@ -179,7 +209,7 @@ async function main() {
     // 新版 Claude Code 的 --dangerously-skip-permissions 不再跳过 hooks，
     // 需要通过环境变量让 hook 脚本自行放行
     if (process.env.CC_IM_SKIP_PERMISSIONS === '1') {
-        if (isChannelMode()) await notifyToolUse(chatId, toolName, toolInput);
+        if (isPushMode()) await notifyToolUse(chatId, toolName, toolInput);
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
         process.exit(HOOK_EXIT_CODES.SUCCESS);
     }

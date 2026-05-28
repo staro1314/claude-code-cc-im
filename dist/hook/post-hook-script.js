@@ -13,12 +13,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-function isChannelMode() {
+function isPushMode() {
     try {
-        const content = readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8').trim();
-        const createdAt = parseInt(content, 10);
-        if (!createdAt) return false;
-        return (Date.now() - createdAt) < 30_000;
+        readFileSync(join(homedir(), '.cc-im', 'wecom-mode'), 'utf-8');
+        return true;
     } catch { return false; }
 }
 
@@ -59,7 +57,7 @@ function notifyToolResult(chatId, toolName, result) {
 }
 
 async function main() {
-    if (!isChannelMode()) return;
+    if (!isPushMode()) return;
     const chatId = resolveChatId();
     if (!chatId) return;
 
