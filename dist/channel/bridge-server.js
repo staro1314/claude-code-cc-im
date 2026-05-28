@@ -37,8 +37,9 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
   let lastChatId = '';
   // Track heartbeat card for in-place update
   let heartbeatTaskId = '';
-  // Accumulate tool events for streaming card update
+  // Accumulate tool events for batch send
   let streamLines = [];
+  let streamFlushTimer = null;
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -119,41 +120,44 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → forward to WeChat Work (streaming via template card)
+      // Tool event notification → buffer and batch-send to WeChat Work
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
           const { chat_id, tool_name, notification } = body;
           const chatId = chat_id || lastChatId;
-
-          if (tool_name === 'heartbeat-done') {
-            // 心跳结束：更新卡片为完成状态，然后重置
-            if (chatId && heartbeatTaskId && updateHeartbeatCard) {
-              await updateHeartbeatCard(chatId, heartbeatTaskId, notification);
-            }
-            heartbeatTaskId = '';
-            streamLines = [];
-          } else if (chatId && notification) {
-            // 所有事件：累积到流式卡片，更新同一张卡片
-            if (tool_name !== 'heartbeat') {
-              streamLines.push(notification);
-              if (streamLines.length > 15) streamLines = streamLines.slice(-15);
-            }
-            const cardContent = (tool_name === 'heartbeat')
-              ? notification
-              : `⏳ 实时执行流\n\n${streamLines.slice(-8).join('\n\n')}`;
-            if (updateHeartbeatCard) {
-              if (heartbeatTaskId) {
-                await updateHeartbeatCard(chatId, heartbeatTaskId, cardContent);
-              } else {
-                heartbeatTaskId = await updateHeartbeatCard(chatId, '', cardContent);
-              }
-            } else {
-              // 降级：无卡片更新能力时发文本
-              await sendTextReply(chatId, notification);
-            }
-            log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+          if (!chatId || !notification) {
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+            return;
           }
+
+          // 心跳特殊处理：发单独消息
+          if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
+            await sendTextReply(chatId, notification);
+            if (tool_name === 'heartbeat-done') streamLines = [];
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
+          // 普通事件：缓冲，定时批量发送
+          streamLines.push(notification);
+          if (streamLines.length > 10) streamLines = streamLines.slice(-10);
+          if (!streamFlushTimer) {
+            streamFlushTimer = setTimeout(async () => {
+              streamFlushTimer = null;
+              if (streamLines.length === 0) return;
+              const batch = streamLines.splice(0, streamLines.length);
+              try {
+                await sendTextReply(chatId, batch.join('\n'));
+              } catch (err) {
+                log.error('Stream flush error:', err);
+              }
+            }, 800);
+            streamFlushTimer.unref?.();
+          }
+          log.debug(`Tool event buffered → chat=${chatId}: ${tool_name}`);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
