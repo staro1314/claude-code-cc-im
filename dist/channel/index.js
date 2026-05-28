@@ -17,6 +17,7 @@ import { loadConfig } from '../config.js';
 import { initWecom, stopWecom } from '../wecom/client.js';
 import { setupWecomChannelHandlers } from './wecom-channel-handler.js';
 import { startBridgeServer } from './bridge-server.js';
+import { SessionWatcher } from './session-watcher.js';
 import { startPermissionServer } from '../hook/permission-server.js';
 import { ensureHookConfigured } from '../hook/ensure-hook.js';
 import { initLogger, createLogger, closeLogger } from '../logger.js';
@@ -106,6 +107,26 @@ export async function runChannel() {
         process.exit(1);
     }
 
+    // Start session file watcher for real-time thinking push
+    const sessionWatcher = new SessionWatcher({
+        bridgeUrl: `http://127.0.0.1:${bridgeServer.port}`,
+        chatId: '',
+    });
+    sessionWatcher.start().catch(err => log.warn('Session watcher start failed:', err));
+
+    // Update watcher's chatId when WeChat Work messages arrive
+    const origOnMessage = wecomHandle?.stop;
+    if (wecomWsClient) {
+        wecomWsClient.on('message.text', (frame) => {
+            const chatId = frame.body?.chatid || frame.body?.from?.userid;
+            if (chatId) sessionWatcher.setChatId(chatId);
+        });
+        wecomWsClient.on('message.voice', (frame) => {
+            const chatId = frame.body?.chatid || frame.body?.from?.userid;
+            if (chatId) sessionWatcher.setChatId(chatId);
+        });
+    }
+
     log.info('');
     log.info('Channel service is running!');
     log.info('');
@@ -121,6 +142,7 @@ export async function runChannel() {
         if (shuttingDown) return;
         shuttingDown = true;
         log.info('Shutting down channel service...');
+        sessionWatcher.stop();
         wecomHandle?.stop();
         stopWecom();
         await bridgeServer.close();

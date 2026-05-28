@@ -181,6 +181,9 @@ export function setupWecomHandlers(wsClient, config, sessionManager) {
                 isThinking = false;
                 sender.resetStreamForTextSwitch(content, thinkingText).catch(() => { });
             },
+            onToolUseDetail: (_toolName, notification) => {
+                wecomSendText(chatId, notification).catch(() => { });
+            },
             extraCleanup: () => {
                 if (waitingTimer) {
                     clearInterval(waitingTimer);

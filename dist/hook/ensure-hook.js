@@ -6,7 +6,7 @@ import { platform } from 'node:os';
 import { createLogger } from '../logger.js';
 const log = createLogger('Hook');
 const CLAUDE_SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
-const HOOK_MATCHER = 'Bash|Write|Edit';
+const HOOK_MATCHER = '';
 const WATCH_EVENTS = ['PostToolUse', 'Stop', 'SubagentStart', 'SubagentStop'];
 /**
  * 获取 hook-script.js 的绝对路径。
@@ -17,6 +17,14 @@ function getHookScriptPath() {
     // thisFile = <project>/(dist|src)/hook/ensure-hook.(js|ts)
     const projectRoot = dirname(dirname(dirname(thisFile)));
     return join(projectRoot, 'dist', 'hook', 'hook-script.js');
+}
+/**
+ * 获取 post-hook-script.js 的绝对路径。
+ */
+function getPostHookScriptPath() {
+    const thisFile = fileURLToPath(import.meta.url);
+    const projectRoot = dirname(dirname(dirname(thisFile)));
+    return join(projectRoot, 'dist', 'hook', 'post-hook-script.js');
 }
 /**
  * 获取 watch-script.js 的绝对路径。
@@ -76,7 +84,13 @@ export function ensureHookConfigured() {
             const alreadyCorrect = entry.hooks?.some(h => h.command === correctCmd);
             if (alreadyCorrect && !foundCorrect) {
                 foundCorrect = true;
-                filtered.push(entry); // Keep one correct entry
+                // Update matcher if it doesn't match (e.g. old "Bash|Write|Edit" → "")
+                if (entry.matcher !== HOOK_MATCHER) {
+                    log.info(`Fixing hook matcher: ${JSON.stringify(entry.matcher)} → ${JSON.stringify(HOOK_MATCHER)}`);
+                    entry.matcher = HOOK_MATCHER;
+                    needsWrite = true;
+                }
+                filtered.push(entry);
             }
             else if (!alreadyCorrect) {
                 // Fix the command in this entry
@@ -155,6 +169,51 @@ export function ensureHookConfigured() {
             hooks[eventName] = watchFiltered;
         }
     }
+
+    // PostToolUse hook 注册（工具执行结果推送）
+    const postHookScriptPath = getPostHookScriptPath();
+    if (existsSync(postHookScriptPath)) {
+        const postHookCmd = isWin ? `node "${postHookScriptPath}"` : postHookScriptPath;
+        const postToolUse = hooks.PostToolUse ?? [];
+        let postFoundCorrect = false;
+        const postFiltered = [];
+        for (const entry of postToolUse) {
+            const hasOurHook = entry.hooks?.some(h => isOurHook(h.command, postHookScriptPath));
+            if (hasOurHook) {
+                const alreadyCorrect = entry.hooks?.some(h => h.command === postHookCmd);
+                if (alreadyCorrect && !postFoundCorrect) {
+                    postFoundCorrect = true;
+                    postFiltered.push(entry);
+                }
+                else if (!alreadyCorrect) {
+                    entry.hooks = entry.hooks.map(h => {
+                        if (isOurHook(h.command, postHookScriptPath) && h.command !== postHookCmd) {
+                            log.info(`Fixing post-hook command: ${h.command} → ${postHookCmd}`);
+                            return { ...h, command: postHookCmd };
+                        }
+                        return h;
+                    });
+                    if (!postFoundCorrect) {
+                        postFoundCorrect = true;
+                        postFiltered.push(entry);
+                    }
+                }
+            }
+            else {
+                postFiltered.push(entry);
+            }
+        }
+        if (!postFoundCorrect) {
+            postFiltered.push({
+                matcher: '',
+                hooks: [{ type: 'command', command: postHookCmd }],
+            });
+            needsWrite = true;
+        }
+        if (postFiltered.length !== postToolUse.length) needsWrite = true;
+        hooks.PostToolUse = postFiltered;
+    }
+
     settings.hooks = hooks;
     try {
         mkdirSync(dirname(CLAUDE_SETTINGS_PATH), { recursive: true });

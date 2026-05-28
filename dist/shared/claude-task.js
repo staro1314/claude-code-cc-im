@@ -161,6 +161,7 @@ export function runClaudeTask(deps, ctx, prompt, adapter) {
                 toolLines.push(notification);
                 if (toolLines.length > 5)
                     toolLines = toolLines.slice(-5);
+                adapter.onToolUseDetail?.(toolName, notification);
                 throttledUpdate(taskState.latestContent);
                 // 收集截图路径
                 if (isScreenshotTool(toolName) && toolInput) {

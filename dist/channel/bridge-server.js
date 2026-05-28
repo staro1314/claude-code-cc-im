@@ -14,7 +14,7 @@
  */
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createLogger } from '../logger.js';
 import { APP_HOME } from '../constants.js';
@@ -57,6 +57,12 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
           lastChatId = chat_id;
+          // Write chatId to file so hook-script can read it in channel mode
+          try {
+            const chatIdFile = join(homedir(), '.cc-im', 'active-chat-id');
+            mkdirSync(join(homedir(), '.cc-im'), { recursive: true });
+            writeFileSync(chatIdFile, chat_id, 'utf-8');
+          } catch { /* ignore */ }
           log.debug(`Channel reply → chat_id=${chat_id}, len=${text.length}`);
           await sendTextReply(chat_id, text);
           res.writeHead(200);
@@ -103,6 +109,26 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           log.error('Bridge permission-decision error:', err);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Tool event notification → forward to WeChat Work
+      if (req.method === 'POST' && req.url === '/tool-event') {
+        try {
+          const body = await readBody(req);
+          const { chat_id, tool_name, notification } = body;
+          const chatId = chat_id || lastChatId;
+          if (chatId && notification) {
+            log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+            await sendTextReply(chatId, notification);
+          }
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          log.error('Bridge tool-event error:', err);
           res.writeHead(500);
           res.end(JSON.stringify({ error: err.message }));
         }

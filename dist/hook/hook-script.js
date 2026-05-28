@@ -19,7 +19,59 @@
  *   2 - Permission server unreachable (deny decision written to stdout)
  */
 import { request } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { READ_ONLY_TOOLS, HOOK_EXIT_CODES } from '../constants.js';
+
+/**
+ * 获取 chatId：优先环境变量，fallback 到文件
+ * channel 模式下 CC_IM_CHAT_ID 未设置，需要从 bridge 写入的文件读取
+ */
+function resolveChatId() {
+    const envId = process.env.CC_IM_CHAT_ID;
+    if (envId) return envId;
+    try {
+        const chatIdFile = join(homedir(), '.cc-im', 'active-chat-id');
+        return readFileSync(chatIdFile, 'utf-8').trim();
+    } catch {
+        return '';
+    }
+}
+
+function getToolEmoji(name) {
+    const map = { Read: '📖', Write: '✏️', Edit: '✏️', Bash: '💻', Grep: '🔍', Glob: '📂', WebFetch: '🌐', WebSearch: '🔎', Agent: '🤖', Task: '📋', Skill: '⚡', NotebookEdit: '📓' };
+    return map[name] || '🔧';
+}
+function truncate(s, max) { return s.length > max ? s.slice(0, max) + '...' : s; }
+function formatToolDetail(name, input) {
+    if (!input) return '';
+    switch (name) {
+        case 'Read': { const fp = input.file_path ?? ''; const parts = [fp]; if (input.offset) parts.push(`L${input.offset}`); if (input.limit) parts.push(`${input.limit}行`); return fp ? ` → ${parts.join(' ')}` : ''; }
+        case 'Edit': { const fp = input.file_path ?? ''; const oc = (String(input.old_string ?? '')).split('\n').length; const nc = (String(input.new_string ?? '')).split('\n').length; return fp ? ` → ${fp} (-${oc}/+${nc} 行)` : ''; }
+        case 'Write': { const fp = input.file_path ?? ''; const len = String(input.content ?? '').length; return fp ? ` → ${fp} (${len}字符)` : ''; }
+        case 'Bash': return input.command ? ` → ${truncate(String(input.command), 60)}` : '';
+        case 'Grep': case 'Glob': return input.pattern ? ` → ${input.pattern}` : '';
+        case 'WebFetch': return input.url ? ` → ${truncate(String(input.url), 60)}` : '';
+        case 'WebSearch': return input.query ? ` → ${input.query}` : '';
+        case 'Agent': return input.prompt ? ` → ${truncate(String(input.prompt), 60)}` : '';
+        case 'Task': return input.description ? ` → ${truncate(String(input.description), 40)}` : '';
+        default: return '';
+    }
+}
+function notifyToolUse(chatId, toolName, toolInput) {
+    const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT ?? '18790', 10);
+    if (!bridgePort || !chatId) return;
+    const emoji = getToolEmoji(toolName);
+    const detail = formatToolDetail(toolName, toolInput);
+    const notification = `${emoji} ${toolName}${detail}`;
+    const payload = JSON.stringify({ chat_id: chatId, tool_name: toolName, notification });
+    const req = request({ hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 3000 }, () => {});
+    req.on('error', () => {});
+    req.on('timeout', () => req.destroy());
+    req.write(payload);
+    req.end();
+}
 function readStdin() {
     return new Promise((resolve) => {
         let data = '';
@@ -65,7 +117,7 @@ function httpPost(port, path, body) {
     });
 }
 async function main() {
-    const chatId = process.env.CC_IM_CHAT_ID;
+    const chatId = resolveChatId();
     const port = parseInt(process.env.CC_IM_HOOK_PORT ?? '18900', 10);
     // No chat ID configured - deny by default for security
     if (!chatId) {
@@ -86,6 +138,8 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
+    // 立即推送工具调用通知（不等权限结果，确保实时性）
+    notifyToolUse(chatId, toolName, toolInput);
     // Skip permission check for read-only tools - allow immediately
     if (READ_ONLY_TOOLS.includes(toolName)) {
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
