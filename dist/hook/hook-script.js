@@ -40,6 +40,16 @@ function resolveChatId() {
 }
 
 /**
+ * 判断是否为 channel 模式（通过标记文件）
+ */
+function isChannelMode() {
+    try {
+        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
+        return true;
+    } catch { return false; }
+}
+
+/**
  * 将当前会话的 transcript_path 写入文件，供 SessionWatcher 定位正确的 session 文件
  */
 function writeTranscriptPath(transcriptPath) {
@@ -152,16 +162,11 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
-    // 仅 channel 模式写入 transcript_path（通过标记文件判断）
-    // 防止其他 Claude Code 实例覆盖 channel 模式的 active-transcript 文件
-    try {
-        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
+    // 仅 channel 模式写入 transcript_path 并推送通知
+    if (isChannelMode()) {
         writeTranscriptPath(input.transcript_path);
-    } catch {
-        // 非 channel 模式，不写入
+        await notifyToolUse(chatId, toolName, toolInput);
     }
-    // 推送工具调用通知（await 确保 HTTP 请求完成后再退出）
-    await notifyToolUse(chatId, toolName, toolInput);
     // Skip permission check for read-only tools - allow immediately
     if (READ_ONLY_TOOLS.includes(toolName)) {
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
@@ -171,7 +176,7 @@ async function main() {
     // 新版 Claude Code 的 --dangerously-skip-permissions 不再跳过 hooks，
     // 需要通过环境变量让 hook 脚本自行放行
     if (process.env.CC_IM_SKIP_PERMISSIONS === '1') {
-        await notifyToolUse(chatId, toolName, toolInput);
+        if (isChannelMode()) await notifyToolUse(chatId, toolName, toolInput);
         process.stdout.write(JSON.stringify({ permissionDecision: 'allow' }));
         process.exit(HOOK_EXIT_CODES.SUCCESS);
     }

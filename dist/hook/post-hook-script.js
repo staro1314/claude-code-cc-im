@@ -13,6 +13,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+function isChannelMode() {
+    try {
+        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
+        return true;
+    } catch { return false; }
+}
+
 function resolveChatId() {
     const envId = process.env.CC_IM_CHAT_ID;
     if (envId) return envId;
@@ -50,6 +57,7 @@ function notifyToolResult(chatId, toolName, result) {
 }
 
 async function main() {
+    if (!isChannelMode()) return;
     const chatId = resolveChatId();
     if (!chatId) return;
 

@@ -83,10 +83,14 @@ export class SessionWatcher {
   #startHeartbeat() {
     this.#lastActivityTime = Date.now();
     if (this.#heartbeatTimer) return; // already running
+    // 首次立即发送心跳
+    this.#sendHeartbeat(0);
+    // 之后每 30 秒更新
     this.#heartbeatTimer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - this.#lastActivityTime) / 1000);
-      // If no activity for 60s, model is probably idle — stop heartbeat
       if (elapsed > 60) {
+        // 超过 60 秒无活动，模型空闲，发送完成并停止
+        this.#sendHeartbeatDone();
         this.#clearHeartbeat();
         return;
       }
@@ -104,6 +108,18 @@ export class SessionWatcher {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'heartbeat', notification }),
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch { /* ignore */ }
+  }
+
+  async #sendHeartbeatDone() {
+    if (!this.#chatId) return;
+    try {
+      await fetch(`${this.#bridgeUrl}/tool-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'heartbeat-done', notification: '✅ 模型处理完成' }),
         signal: AbortSignal.timeout(3000),
       });
     } catch { /* ignore */ }

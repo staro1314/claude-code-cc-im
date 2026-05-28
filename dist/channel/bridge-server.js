@@ -32,9 +32,11 @@ const log = createLogger('Bridge');
  * @param {Function} options.resolvePermission - (requestId, decision) => void
  * @returns {Promise<{port: number, close: () => Promise<void>}>}
  */
-export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission }) {
+export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
+  // Track heartbeat card for in-place update
+  let heartbeatTaskId = '';
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -121,7 +123,26 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
           const body = await readBody(req);
           const { chat_id, tool_name, notification } = body;
           const chatId = chat_id || lastChatId;
-          if (chatId && notification) {
+
+          if (tool_name === 'heartbeat' && chatId && updateHeartbeatCard) {
+            // 心跳：更新已有卡片或创建新卡片
+            if (heartbeatTaskId) {
+              await updateHeartbeatCard(chatId, heartbeatTaskId, notification);
+            } else {
+              heartbeatTaskId = await updateHeartbeatCard(chatId, '', notification);
+            }
+          } else if (tool_name === 'heartbeat-done') {
+            // 心跳结束：更新卡片为完成状态，然后重置
+            if (chatId && heartbeatTaskId && updateHeartbeatCard) {
+              await updateHeartbeatCard(chatId, heartbeatTaskId, notification);
+            }
+            heartbeatTaskId = '';
+          } else if (chatId && notification) {
+            // 普通工具事件：发送文本消息，并清除心跳卡片
+            if (heartbeatTaskId && updateHeartbeatCard) {
+              await updateHeartbeatCard(chatId, heartbeatTaskId, '✅ 模型处理完成');
+              heartbeatTaskId = '';
+            }
             log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
             await sendTextReply(chatId, notification);
           }

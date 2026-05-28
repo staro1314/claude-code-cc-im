@@ -81,6 +81,35 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
+        updateHeartbeatCard: async (chatId, existingTaskId, text) => {
+            if (!wecomWsClient) return '';
+            try {
+                if (existingTaskId) {
+                    // 更新已有卡片
+                    await wecomWsClient.updateTemplateCard(null, {
+                        card_type: 'text_notice',
+                        main_title: { title: '⏳ 模型处理中' },
+                        sub_title_text: text,
+                        task_id: existingTaskId,
+                    });
+                    return existingTaskId;
+                } else {
+                    // 发送新卡片
+                    const result = await wecomWsClient.sendMessage(chatId, {
+                        msgtype: 'template_card',
+                        template_card: {
+                            card_type: 'text_notice',
+                            main_title: { title: '⏳ 模型处理中' },
+                            sub_title_text: text,
+                        },
+                    });
+                    return result?.task_id ?? '';
+                }
+            } catch (err) {
+                log.debug(`Heartbeat card update failed: ${err.message}`);
+                return existingTaskId || '';
+            }
+        },
     });
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 
