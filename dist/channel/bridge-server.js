@@ -37,9 +37,10 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
   let lastChatId = '';
   // Track heartbeat card for in-place update
   let heartbeatTaskId = '';
-  // Accumulate tool events for batch send
+  // Current message frame for template card updates (from incoming WeChat Work message)
+  let currentFrame = null;
+  // Accumulated lines for streaming card content
   let streamLines = [];
-  let streamFlushTimer = null;
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -120,44 +121,67 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → buffer and batch-send to WeChat Work
+      // Save current message frame for template card updates
+      if (req.method === 'POST' && req.url === '/set-frame') {
+        try {
+          const body = await readBody(req);
+          currentFrame = body.frame || null;
+          lastChatId = body.chat_id || lastChatId;
+          log.debug(`Frame saved: chat=${lastChatId}`);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Tool event notification → stream via template card update
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
           const { chat_id, tool_name, notification } = body;
           const chatId = chat_id || lastChatId;
+
+          // 心跳完成：重置卡片
+          if (tool_name === 'heartbeat-done') {
+            streamLines = [];
+            heartbeatTaskId = '';
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
           if (!chatId || !notification) {
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 心跳特殊处理：发单独消息
-          if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
-            await sendTextReply(chatId, notification);
-            if (tool_name === 'heartbeat-done') streamLines = [];
-            res.writeHead(200);
-            res.end(JSON.stringify({ ok: true }));
-            return;
+          // 普通事件：累积到流式卡片
+          if (tool_name !== 'heartbeat') {
+            streamLines.push(notification);
+            if (streamLines.length > 15) streamLines = streamLines.slice(-15);
           }
 
-          // 普通事件：缓冲，定时批量发送
-          streamLines.push(notification);
-          if (streamLines.length > 10) streamLines = streamLines.slice(-10);
-          if (!streamFlushTimer) {
-            streamFlushTimer = setTimeout(async () => {
-              streamFlushTimer = null;
-              if (streamLines.length === 0) return;
-              const batch = streamLines.splice(0, streamLines.length);
-              try {
-                await sendTextReply(chatId, batch.join('\n'));
-              } catch (err) {
-                log.error('Stream flush error:', err);
-              }
-            }, 800);
-            streamFlushTimer.unref?.();
+          // 构建卡片内容
+          const cardContent = (tool_name === 'heartbeat')
+            ? notification
+            : streamLines.slice(-10).join('\n');
+
+          // 用 frame 更新模板卡片（需要 frame 才能调用 updateTemplateCard）
+          if (currentFrame && updateHeartbeatCard) {
+            if (!heartbeatTaskId) {
+              heartbeatTaskId = await updateHeartbeatCard(chatId, '', cardContent, currentFrame);
+            } else {
+              await updateHeartbeatCard(chatId, heartbeatTaskId, cardContent, currentFrame);
+            }
+          } else {
+            // 无 frame 时降级为文本消息
+            await sendTextReply(chatId, notification);
           }
-          log.debug(`Tool event buffered → chat=${chatId}: ${tool_name}`);
+          log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {

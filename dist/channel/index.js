@@ -81,14 +81,14 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
-        updateHeartbeatCard: async (chatId, existingTaskId, text) => {
+        updateHeartbeatCard: async (chatId, existingTaskId, text, frame) => {
             if (!wecomWsClient) return '';
             try {
-                if (existingTaskId) {
-                    // 更新已有卡片
-                    await wecomWsClient.updateTemplateCard(null, {
+                if (existingTaskId && frame) {
+                    // 更新已有卡片（需要 frame 提供 req_id）
+                    await wecomWsClient.updateTemplateCard(frame, {
                         card_type: 'text_notice',
-                        main_title: { title: '⏳ 模型处理中' },
+                        main_title: { title: '⏳ 实时执行流' },
                         sub_title_text: text,
                         task_id: existingTaskId,
                     });
@@ -99,14 +99,14 @@ export async function runChannel() {
                         msgtype: 'template_card',
                         template_card: {
                             card_type: 'text_notice',
-                            main_title: { title: '⏳ 模型处理中' },
+                            main_title: { title: '⏳ 实时执行流' },
                             sub_title_text: text,
                         },
                     });
                     return result?.task_id ?? '';
                 }
             } catch (err) {
-                log.debug(`Heartbeat card update failed: ${err.message}`);
+                log.debug(`Card update failed: ${err.message}`);
                 return existingTaskId || '';
             }
         },
@@ -145,16 +145,36 @@ export async function runChannel() {
     });
     sessionWatcher.start().catch(err => log.warn('Session watcher start failed:', err));
 
-    // Update watcher's chatId when WeChat Work messages arrive
-    const origOnMessage = wecomHandle?.stop;
+    // Update watcher's chatId and save frame when WeChat Work messages arrive
     if (wecomWsClient) {
-        wecomWsClient.on('message.text', (frame) => {
+        wecomWsClient.on('message.text', async (frame) => {
             const chatId = frame.body?.chatid || frame.body?.from?.userid;
-            if (chatId) sessionWatcher.setChatId(chatId);
+            if (chatId) {
+                sessionWatcher.setChatId(chatId);
+                // Save frame to bridge for template card updates
+                try {
+                    await fetch(`http://127.0.0.1:${bridgeServer.port}/set-frame`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ chat_id: chatId, frame: { headers: frame.headers, body: frame.body, cmd: frame.cmd } }),
+                        signal: AbortSignal.timeout(2000),
+                    });
+                } catch { /* ignore */ }
+            }
         });
-        wecomWsClient.on('message.voice', (frame) => {
+        wecomWsClient.on('message.voice', async (frame) => {
             const chatId = frame.body?.chatid || frame.body?.from?.userid;
-            if (chatId) sessionWatcher.setChatId(chatId);
+            if (chatId) {
+                sessionWatcher.setChatId(chatId);
+                try {
+                    await fetch(`http://127.0.0.1:${bridgeServer.port}/set-frame`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ chat_id: chatId, frame: { headers: frame.headers, body: frame.body, cmd: frame.cmd } }),
+                        signal: AbortSignal.timeout(2000),
+                    });
+                } catch { /* ignore */ }
+            }
         });
     }
 
