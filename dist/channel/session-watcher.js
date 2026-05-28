@@ -1,13 +1,12 @@
 /**
- * Session File Watcher
+ * Session File Watcher (Polling-based)
  *
- * Monitors ALL Claude Code session JSONL files for thinking events
- * and pushes them to the bridge server in real-time.
- *
+ * Uses polling instead of fs.watch (unreliable on Windows).
+ * Monitors ALL Claude Code session JSONL files for thinking events.
  * Thinking events have unique UUIDs for deduplication.
- * Also manages the heartbeat (loading indicator) for active sessions.
+ * Also manages the heartbeat (loading indicator).
  */
-import { watch, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { readdir, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -15,19 +14,16 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('SessionWatcher');
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+const POLL_INTERVAL = 2000; // 2 seconds
 
 export class SessionWatcher {
   /** @type {Map<string, number>} filePath → last known file size */
   #fileSizes = new Map();
-  /** @type {Set<string>} UUIDs of already-sent events (thinking + tool calls) */
+  /** @type {Set<string>} UUIDs of already-sent events */
   #sentUuids = new Set();
-  /** @type {import('node:fs').FSWatcher | null} */
-  #watcher = null;
   /** @type {NodeJS.Timeout | null} */
-  #scanTimer = null;
-  /** @type {string} bridge server URL */
+  #pollTimer = null;
   #bridgeUrl;
-  /** @type {string} chat_id for WeChat Work */
   #chatId;
   #maxSentUuids = 5000;
   /** @type {NodeJS.Timeout | null} */
@@ -41,25 +37,19 @@ export class SessionWatcher {
   }
 
   async start() {
-    log.info(`Watching all session files in ${PROJECTS_DIR}`);
+    // Initial scan to record current file sizes
     await this.#scanAllFiles();
-    try {
-      this.#watcher = watch(PROJECTS_DIR, { recursive: true }, (eventType, filename) => {
-        if (!filename || !filename.endsWith('.jsonl')) return;
-        this.#scheduleRead(join(PROJECTS_DIR, filename));
-      });
-      log.info('Session file watcher started');
-    } catch (err) {
-      log.warn('Failed to watch, using scan fallback:', err.message);
-      this.#scanTimer = setInterval(() => this.#scanAllFiles(), 3000);
-    }
+    log.info(`Session watcher started (polling ${POLL_INTERVAL}ms, tracking ${this.#fileSizes.size} files)`);
+
+    // Poll for changes
+    this.#pollTimer = setInterval(() => this.#poll(), POLL_INTERVAL);
+    this.#pollTimer.unref();
   }
 
   setChatId(chatId) { this.#chatId = chatId; }
 
   stop() {
-    if (this.#watcher) { this.#watcher.close(); this.#watcher = null; }
-    if (this.#scanTimer) { clearInterval(this.#scanTimer); this.#scanTimer = null; }
+    if (this.#pollTimer) { clearInterval(this.#pollTimer); this.#pollTimer = null; }
     this.#clearHeartbeat();
     this.#sentUuids.clear();
     log.info('Session watcher stopped');
@@ -81,16 +71,22 @@ export class SessionWatcher {
     this.#heartbeatTimer.unref();
   }
 
-  /** @type {Map<string, NodeJS.Timeout>} */
-  #pendingReads = new Map();
-
-  #scheduleRead(filePath) {
-    const existing = this.#pendingReads.get(filePath);
-    if (existing) clearTimeout(existing);
-    this.#pendingReads.set(filePath, setTimeout(() => {
-      this.#pendingReads.delete(filePath);
-      this.#readNewLines(filePath).catch(() => {});
-    }, 200));
+  async #poll() {
+    // Discover new files
+    await this.#scanAllFiles();
+    // Check each tracked file for size changes
+    let changedCount = 0;
+    for (const [filePath, lastSize] of this.#fileSizes) {
+      try {
+        const s = await stat(filePath);
+        if (s.size > lastSize) {
+          changedCount++;
+          await this.#readNewLines(filePath, lastSize);
+          this.#fileSizes.set(filePath, s.size);
+        }
+      } catch { /* file deleted */ }
+    }
+    if (changedCount > 0) log.debug(`Poll: ${changedCount} files changed`);
   }
 
   async #scanAllFiles() {
@@ -104,40 +100,41 @@ export class SessionWatcher {
           for (const file of files) {
             if (!file.endsWith('.jsonl')) continue;
             const filePath = join(dirPath, file);
-            try {
-              const s = await stat(filePath);
-              this.#fileSizes.set(filePath, s.size);
-            } catch { /* deleted */ }
+            if (!this.#fileSizes.has(filePath)) {
+              try {
+                const s = await stat(filePath);
+                this.#fileSizes.set(filePath, s.size);
+              } catch { /* deleted */ }
+            }
           }
         } catch { /* permission */ }
       }
     } catch (err) { log.debug('Scan error:', err); }
   }
 
-  async #readNewLines(filePath) {
-    const lastSize = this.#fileSizes.get(filePath) ?? 0;
-    let currentSize;
-    try { const s = await stat(filePath); currentSize = s.size; } catch { return; }
-    if (currentSize <= lastSize) return;
-
-    this.#startHeartbeat();
-
+  async #readNewLines(filePath, lastSize) {
     let fh;
     try {
       fh = await open(filePath, 'r');
-      const buf = Buffer.alloc(currentSize - lastSize);
+      const s = await fh.stat();
+      const buf = Buffer.alloc(s.size - lastSize);
       await fh.read(buf, 0, buf.length, lastSize);
-      this.#fileSizes.set(filePath, currentSize);
+
+      this.#startHeartbeat();
+
       const lines = buf.toString('utf-8').split('\n');
+      let thinkingFound = 0;
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
           if (event.type === 'thinking' && event.uuid && !this.#sentUuids.has(event.uuid)) {
+            thinkingFound++;
             await this.#handleThinkingEvent(event);
           }
         } catch { /* malformed */ }
       }
+      if (thinkingFound > 0) log.info(`Pushed ${thinkingFound} thinking events from ${filePath.split(/[\\/]/).pop()}`);
     } catch (err) { log.debug(`Read error: ${err.message}`); }
     finally { await fh?.close(); }
   }
