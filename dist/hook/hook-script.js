@@ -152,8 +152,14 @@ async function main() {
     }
     const toolName = input.tool_name ?? 'unknown';
     const toolInput = input.tool_input ?? {};
-    // 记录当前会话的 transcript_path，供 SessionWatcher 定位正确的 session 文件（防窜台）
-    writeTranscriptPath(input.transcript_path);
+    // 仅 channel 模式写入 transcript_path（通过标记文件判断）
+    // 防止其他 Claude Code 实例覆盖 channel 模式的 active-transcript 文件
+    try {
+        readFileSync(join(homedir(), '.cc-im', 'channel-active'), 'utf-8');
+        writeTranscriptPath(input.transcript_path);
+    } catch {
+        // 非 channel 模式，不写入
+    }
     // 推送工具调用通知（await 确保 HTTP 请求完成后再退出）
     await notifyToolUse(chatId, toolName, toolInput);
     // Skip permission check for read-only tools - allow immediately

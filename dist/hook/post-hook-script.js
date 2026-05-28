@@ -71,5 +71,5 @@ async function main() {
 }
 
 const isDirectRun = process.argv[1]?.endsWith('post-hook-script.js');
-if (isDirectRun) main();
+if (isDirectRun) main().catch(() => process.exit(0));
 export { main };

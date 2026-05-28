@@ -33,6 +33,12 @@ export class SessionWatcher {
   /** @type {string} chat_id for WeChat Work */
   #chatId;
   #maxSentUuids = 5000;
+  /** @type {NodeJS.Timeout | null} heartbeat timer */
+  #heartbeatTimer = null;
+  /** @type {number} last time session file was modified */
+  #lastActivityTime = 0;
+  /** @type {number} heartbeat interval in ms */
+  #heartbeatInterval = 30_000;
 
   constructor({ bridgeUrl, chatId }) {
     this.#bridgeUrl = bridgeUrl;
@@ -65,8 +71,42 @@ export class SessionWatcher {
   stop() {
     if (this.#watcher) { this.#watcher.close(); this.#watcher = null; }
     if (this.#pollTimer) { clearInterval(this.#pollTimer); this.#pollTimer = null; }
+    this.#clearHeartbeat();
     this.#sentUuids.clear();
     log.info('Session watcher stopped');
+  }
+
+  #clearHeartbeat() {
+    if (this.#heartbeatTimer) { clearInterval(this.#heartbeatTimer); this.#heartbeatTimer = null; }
+  }
+
+  #startHeartbeat() {
+    this.#lastActivityTime = Date.now();
+    if (this.#heartbeatTimer) return; // already running
+    this.#heartbeatTimer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - this.#lastActivityTime) / 1000);
+      // If no activity for 60s, model is probably idle — stop heartbeat
+      if (elapsed > 60) {
+        this.#clearHeartbeat();
+        return;
+      }
+      this.#sendHeartbeat(elapsed);
+    }, this.#heartbeatInterval);
+    this.#heartbeatTimer.unref();
+  }
+
+  async #sendHeartbeat(elapsedSec) {
+    if (!this.#chatId) return;
+    const elapsed = elapsedSec ?? Math.floor((Date.now() - this.#lastActivityTime) / 1000);
+    const notification = `⏳ 模型处理中... (${elapsed}s)`;
+    try {
+      await fetch(`${this.#bridgeUrl}/tool-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: this.#chatId, tool_name: 'heartbeat', notification }),
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch { /* ignore */ }
   }
 
   /**
@@ -121,6 +161,9 @@ export class SessionWatcher {
     } catch { return; }
 
     if (currentSize <= this.#lastSize) return;
+
+    // 文件有新内容 → 模型在活跃，启动/刷新心跳
+    this.#startHeartbeat();
 
     let fh;
     try {

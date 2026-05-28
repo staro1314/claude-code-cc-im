@@ -85,12 +85,14 @@ export async function runChannel() {
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 
     // Write bridge port for other modules
-    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { writeFileSync, mkdirSync, unlinkSync } = await import('node:fs');
     const { join } = await import('node:path');
     const { homedir } = await import('node:os');
     const appHome = join(homedir(), '.cc-im');
     mkdirSync(appHome, { recursive: true });
     writeFileSync(join(appHome, 'bridge-port'), String(bridgeServer.port), 'utf-8');
+    // 创建 channel-active 标记文件，供 hook-script 判断是否为 channel 模式
+    writeFileSync(join(appHome, 'channel-active'), String(Date.now()), 'utf-8');
 
     // Initialize WeChat Work in channel mode
     let wecomHandle = null;
@@ -142,6 +144,8 @@ export async function runChannel() {
         if (shuttingDown) return;
         shuttingDown = true;
         log.info('Shutting down channel service...');
+        // 删除 channel-active 标记文件
+        try { unlinkSync(join(homedir(), '.cc-im', 'channel-active')); } catch { /* ignore */ }
         sessionWatcher.stop();
         wecomHandle?.stop();
         stopWecom();
