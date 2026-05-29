@@ -272,11 +272,14 @@ export function createWecomSender(wsClient) {
             // 如果内容较长（含 diff 等），先发一条文本消息展示详情
             if (inputSummary.length > 80) {
                 try {
-                    await wsClient.sendMessage(chatId, {
+                    const client = getWSClient();
+                    await client.sendMessage(chatId, {
                         msgtype: 'markdown',
                         markdown: { content: `🔐 **${toolName}** 请求确认:\n\n${inputSummary.slice(0, 1000)}` },
                     });
-                } catch { /* ignore */ }
+                } catch (err) {
+                    log.warn('Failed to send permission diff preview:', err);
+                }
             }
             // 权限卡片只放简短摘要 + 按钮
             const shortSummary = inputSummary.split('\n')[0].slice(0, 80);
