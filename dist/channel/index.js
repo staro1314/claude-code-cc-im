@@ -92,6 +92,7 @@ export async function runChannel() {
                         sub_title_text: text,
                         task_id: existingTaskId,
                     });
+                    log.debug(`Card updated: taskId=${existingTaskId}`);
                     return existingTaskId;
                 } else {
                     // 发送新卡片
@@ -103,11 +104,12 @@ export async function runChannel() {
                             sub_title_text: text,
                         },
                     });
-                    return result?.task_id ?? '';
+                    log.debug(`Card sent: result=${JSON.stringify(result)?.slice(0, 200)}`);
+                    return result?.task_id ?? result?.msgid ?? '';
                 }
             } catch (err) {
-                log.debug(`Card update failed: ${err.message}`);
-                return existingTaskId || '';
+                log.warn(`Card update failed: errcode=${err.errcode} msg=${err.message}`);
+                return '';
             }
         },
     });

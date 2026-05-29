@@ -170,16 +170,13 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             ? notification
             : streamLines.slice(-10).join('\n');
 
-          // 用 frame 更新模板卡片（需要 frame 才能调用 updateTemplateCard）
+          // 用 frame 更新模板卡片
           if (currentFrame && updateHeartbeatCard) {
             if (!heartbeatTaskId) {
               heartbeatTaskId = await updateHeartbeatCard(chatId, '', cardContent, currentFrame);
             } else {
               await updateHeartbeatCard(chatId, heartbeatTaskId, cardContent, currentFrame);
             }
-          } else {
-            // 无 frame 时降级为文本消息
-            await sendTextReply(chatId, notification);
           }
           log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
           res.writeHead(200);
