@@ -153,31 +153,19 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 心跳：作为 toolNote 显示在流式消息底部
+          // 心跳：仅后台检测，不推送到企业微信
           if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
-            if (streamController?.isActive?.()) {
-              try {
-                const content = streamLines.length > 0 ? streamLines.join('\n') : '⏳ 处理中...';
-                await streamController.update(content, notification);
-              } catch { await sendTextReply(chatId, notification); }
-            } else {
-              await sendTextReply(chatId, notification);
-            }
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 所有其他事件：累积到流式消息
+          // 所有其他事件：累积到流式消息，失败则 fallback 文本
           log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
           if (streamController?.isActive?.()) {
             const content = appendStreamLine(notification);
-            try {
-              await streamController.update(content);
-            } catch (err) {
-              log.warn('Stream update failed, fallback:', err);
-              await sendTextReply(chatId, notification);
-            }
+            const ok = await streamController.update(content);
+            if (!ok) await sendTextReply(chatId, notification);
           } else {
             await sendTextReply(chatId, notification);
           }

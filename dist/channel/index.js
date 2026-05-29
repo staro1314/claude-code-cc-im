@@ -66,13 +66,26 @@ export async function runChannel() {
     const streamController = {
         isActive: () => streamActive && channelSender != null,
         update: async (content, toolNote) => {
-            if (!channelSender || !streamActive) return;
-            await channelSender.sendStreamUpdate(content, toolNote);
+            if (!channelSender || !streamActive) return false;
+            try {
+                const sent = await channelSender.sendStreamUpdate(content, toolNote);
+                // sendStreamUpdate 内部 session 为 null 时静默返回，视为失败
+                return sent !== false;
+            } catch {
+                streamActive = false;
+                return false;
+            }
         },
         complete: async (text) => {
-            if (!channelSender || !streamActive) return;
-            await channelSender.sendStreamComplete(text);
-            streamActive = false;
+            if (!channelSender || !streamActive) return false;
+            try {
+                await channelSender.sendStreamComplete(text);
+                streamActive = false;
+                return true;
+            } catch {
+                streamActive = false;
+                return false;
+            }
         },
     };
 

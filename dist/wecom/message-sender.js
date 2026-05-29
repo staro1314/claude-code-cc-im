@@ -269,8 +269,18 @@ export function createWecomSender(wsClient) {
         },
         async sendPermissionCard(chatId, requestId, toolName, toolInput) {
             const inputSummary = buildInputSummary(toolName, toolInput);
-            // 支持自定义按钮：toolInput._buttons 可覆盖默认按钮
-            // 格式: [{ text: '按钮文案', key: 'action_key', style?: 1|3 }]
+            // 如果内容较长（含 diff 等），先发一条文本消息展示详情
+            if (inputSummary.length > 80) {
+                try {
+                    await wsClient.sendMessage(chatId, {
+                        msgtype: 'text',
+                        text: { content: `🔐 ${toolName} 请求确认:\n\n${inputSummary.slice(0, 1000)}` },
+                    });
+                } catch { /* ignore */ }
+            }
+            // 权限卡片只放简短摘要 + 按钮
+            const shortSummary = inputSummary.split('\n')[0].slice(0, 80);
+            // 动态按钮
             let buttonList;
             if (Array.isArray(toolInput?._buttons) && toolInput._buttons.length > 0) {
                 buttonList = toolInput._buttons.map(b => ({
@@ -291,7 +301,6 @@ export function createWecomSender(wsClient) {
                     { text: '拒绝', style: 3, key: `perm_deny_${requestId}` },
                 ];
             }
-            // 支持自定义标题
             const title = toolInput?._title || `🔐 ${toolName} - 请求确认`;
             try {
                 await wsClient.sendMessage(chatId, {
@@ -299,7 +308,7 @@ export function createWecomSender(wsClient) {
                     template_card: {
                         card_type: 'button_interaction',
                         main_title: { title },
-                        sub_title_text: inputSummary.length > 300 ? inputSummary.slice(0, 300) + '...' : inputSummary,
+                        sub_title_text: shortSummary,
                         task_id: `perm_${requestId}`,
                         button_list: buttonList,
                     },
