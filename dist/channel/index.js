@@ -90,6 +90,7 @@ export async function runChannel() {
                         card_type: 'text_notice',
                         main_title: { title: '⏳ 实时执行流', desc: '' },
                         sub_title_text: text,
+                        card_action: { type: 1, url: 'https://work.weixin.qq.com' },
                         task_id: existingTaskId,
                     });
                     return existingTaskId;
@@ -101,6 +102,7 @@ export async function runChannel() {
                             card_type: 'text_notice',
                             main_title: { title: '⏳ 实时执行流', desc: '' },
                             sub_title_text: text,
+                            card_action: { type: 1, url: 'https://work.weixin.qq.com' },
                         },
                     });
                     log.debug(`Card sent: result=${JSON.stringify(result)?.slice(0, 300)}`);
