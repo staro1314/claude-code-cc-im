@@ -35,9 +35,6 @@ const log = createLogger('Bridge');
 export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
-  // Accumulated lines for batch send
-  let streamLines = [];
-  let streamFlushTimer = null;
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -118,7 +115,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → buffer and batch-send to WeChat Work
+      // Tool event notification → streaming via individual messages to WeChat Work
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
@@ -130,38 +127,25 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 心跳/完成：立即发送
-          if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
-            // 先 flush 缓冲区
-            if (streamLines.length > 0 && streamFlushTimer) {
-              clearTimeout(streamFlushTimer);
-              streamFlushTimer = null;
-              const batch = streamLines.splice(0, streamLines.length);
-              await sendTextReply(chatId, batch.join('\n')).catch(() => {});
-            }
+          // 心跳：发送状态
+          if (tool_name === 'heartbeat') {
             await sendTextReply(chatId, notification);
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 普通事件：缓冲 2 秒后批量发送（紧凑格式）
-          streamLines.push(notification);
-          if (streamLines.length > 20) streamLines = streamLines.slice(-20);
-          if (!streamFlushTimer) {
-            streamFlushTimer = setTimeout(async () => {
-              streamFlushTimer = null;
-              if (streamLines.length === 0) return;
-              const batch = streamLines.splice(0, streamLines.length);
-              try {
-                await sendTextReply(chatId, batch.join('\n'));
-              } catch (err) {
-                log.error('Batch send error:', err);
-              }
-            }, 2000);
-            streamFlushTimer.unref?.();
+          // 完成：发送完成标记
+          if (tool_name === 'heartbeat-done') {
+            await sendTextReply(chatId, notification);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+            return;
           }
-          log.debug(`Tool event buffered → chat=${chatId}: ${tool_name}`);
+
+          // 所有其他事件：立即发送（实现流式效果）
+          log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+          await sendTextReply(chatId, notification);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
