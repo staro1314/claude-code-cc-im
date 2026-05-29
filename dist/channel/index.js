@@ -82,34 +82,14 @@ export async function runChannel() {
             resolvePermissionById(requestId, decision);
         },
         updateHeartbeatCard: async (chatId, existingTaskId, text, frame) => {
-            if (!wecomWsClient) return '';
+            if (!wecomWsClient || !frame) return '';
+            const streamId = existingTaskId || `stream_${Date.now()}`;
+            const isDone = text === '✅ 模型处理完成';
             try {
-                if (existingTaskId && frame) {
-                    // 更新已有卡片
-                    await wecomWsClient.updateTemplateCard(frame, {
-                        card_type: 'text_notice',
-                        main_title: { title: '⏳ 实时执行流', desc: '' },
-                        sub_title_text: text,
-                        card_action: { type: 1, url: 'https://work.weixin.qq.com' },
-                        task_id: existingTaskId,
-                    });
-                    return existingTaskId;
-                } else {
-                    // 发送新卡片
-                    const result = await wecomWsClient.sendMessage(chatId, {
-                        msgtype: 'template_card',
-                        template_card: {
-                            card_type: 'text_notice',
-                            main_title: { title: '⏳ 实时执行流', desc: '' },
-                            sub_title_text: text,
-                            card_action: { type: 1, url: 'https://work.weixin.qq.com' },
-                        },
-                    });
-                    log.debug(`Card sent: result=${JSON.stringify(result)?.slice(0, 300)}`);
-                    return result?.task_id ?? '';
-                }
+                await wecomWsClient.replyStream(frame, streamId, text, isDone);
+                return streamId;
             } catch (err) {
-                log.warn(`Card failed: ${err.errcode || err.message}`);
+                log.warn(`Stream failed: ${err.message}`);
                 return '';
             }
         },
