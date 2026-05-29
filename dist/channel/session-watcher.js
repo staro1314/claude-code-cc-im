@@ -61,12 +61,11 @@ export class SessionWatcher {
 
   #startHeartbeat() {
     this.#lastActivityTime = Date.now();
+    // 心跳不再推送到企业微信，仅用于内部超时检测
     if (this.#heartbeatTimer) return;
-    this.#sendHeartbeat(0);
     this.#heartbeatTimer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - this.#lastActivityTime) / 1000);
-      if (elapsed > 60) { this.#sendHeartbeatDone(); this.#clearHeartbeat(); return; }
-      this.#sendHeartbeat(elapsed);
+      if (elapsed > 60) { this.#clearHeartbeat(); return; }
     }, this.#heartbeatInterval);
     this.#heartbeatTimer.unref();
   }
