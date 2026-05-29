@@ -30,6 +30,9 @@ export class SessionWatcher {
   #heartbeatTimer = null;
   #lastActivityTime = 0;
   #heartbeatInterval = 30_000;
+  // 断路器：连续推送失败次数
+  #consecutiveFailures = 0;
+  #maxFailures = 3;
 
   constructor({ bridgeUrl, chatId }) {
     this.#bridgeUrl = bridgeUrl;
@@ -61,11 +64,12 @@ export class SessionWatcher {
 
   #startHeartbeat() {
     this.#lastActivityTime = Date.now();
-    // 心跳不再推送到企业微信，仅用于内部超时检测
     if (this.#heartbeatTimer) return;
+    this.#sendHeartbeat(0);
     this.#heartbeatTimer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - this.#lastActivityTime) / 1000);
-      if (elapsed > 60) { this.#clearHeartbeat(); return; }
+      if (elapsed > 60) { this.#sendHeartbeatDone(); this.#clearHeartbeat(); return; }
+      this.#sendHeartbeat(elapsed);
     }, this.#heartbeatInterval);
     this.#heartbeatTimer.unref();
   }
@@ -196,13 +200,28 @@ export class SessionWatcher {
 
   async #push(notification, toolName = 'thinking') {
     if (!this.#chatId) return;
+    // 断路器：连续失败超过阈值，停止推送
+    if (this.#consecutiveFailures >= this.#maxFailures) return;
     try {
-      await fetch(`${this.#bridgeUrl}/tool-event`, {
+      const res = await fetch(`${this.#bridgeUrl}/tool-event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: this.#chatId, tool_name: toolName, notification }),
         signal: AbortSignal.timeout(3000),
       });
-    } catch { /* ignore */ }
+      if (res.ok) {
+        this.#consecutiveFailures = 0;
+      } else {
+        this.#consecutiveFailures++;
+        if (this.#consecutiveFailures >= this.#maxFailures) {
+          log.warn(`Push circuit breaker open: ${this.#consecutiveFailures} consecutive failures, stopping`);
+        }
+      }
+    } catch {
+      this.#consecutiveFailures++;
+      if (this.#consecutiveFailures >= this.#maxFailures) {
+        log.warn(`Push circuit breaker open: ${this.#consecutiveFailures} consecutive failures, stopping`);
+      }
+    }
   }
 }
