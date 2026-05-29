@@ -188,21 +188,13 @@ function startHttpServer(port) {
 
           lastChatId = chat_id;
 
-          // Push message into Claude Code session
-          // Use structured notification with explicit reply instructions
-          const channelTag = `<channel source="wechat-work" chat_id="${chat_id}" user_id="${user_id || ''}" platform="wecom">${content}</channel>`;
-          const promptMessage = `[WeChat Work Message]\n${channelTag}\n\nYou MUST use the "reply" tool to respond. Pass chat_id="${chat_id}" and your response text.`;
+          // Push message into Claude Code session as a user message
+          const promptMessage = `[WeChat Work Message from user ${user_id || 'unknown'} in chat ${chat_id}]\n\n${content}\n\n---\nYou MUST use the "reply" tool to respond. Pass chat_id="${chat_id}" and your response text.`;
 
           await mcp.notification({
             method: 'notifications/claude/channel',
             params: {
               content: promptMessage,
-              meta: {
-                chat_id,
-                user_id: user_id || '',
-                platform: platform || 'wecom',
-                msg_id: msg_id || '',
-              },
             },
           });
 
