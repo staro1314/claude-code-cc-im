@@ -286,38 +286,41 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
                 await sender.sendTextReply(userId, '⏹️ Channel 服务未连接');
             }
         }
-        // Permission buttons
-        else if (eventKey.startsWith('perm_allow_') || eventKey.startsWith('perm_deny_')) {
-            const isAllow = eventKey.startsWith('perm_allow_');
-            const requestId = eventKey.replace(/^perm_(allow|deny)_/, '');
+        // Permission buttons (allow / allow-all / deny)
+        else if (eventKey.startsWith('perm_allow') || eventKey.startsWith('perm_deny_')) {
+            const isAllowAll = eventKey.startsWith('perm_allowall_');
+            const isAllow = eventKey.startsWith('perm_allow_') || isAllowAll;
+            const requestId = eventKey.replace(/^perm_(allowall|allow|deny)_/, '');
             const decision = isAllow ? 'allow' : 'deny';
 
             // Forward decision to channel server
             const channelPort = getChannelPort();
             if (channelPort) {
                 try {
-                    const res = await fetch(`http://127.0.0.1:${channelPort}/permission-decision`, {
+                    await fetch(`http://127.0.0.1:${channelPort}/permission-decision`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ request_id: requestId, decision }),
+                        body: JSON.stringify({ request_id: requestId, decision, allow_all: isAllowAll }),
                     });
-                    log.info(`Permission decision forwarded: ${requestId} → ${decision}`);
+                    log.info(`Permission decision forwarded: ${requestId} → ${decision}${isAllowAll ? ' (all)' : ''}`);
                 } catch (err) {
                     log.warn(`Failed to forward permission decision: ${err.message}`);
                 }
             }
 
             // Update card
+            const label = isAllowAll ? '✅ 已全部允许' : (isAllow ? '✅ 已允许' : '❌ 已拒绝');
             try {
                 const taskId = body.event?.template_card_event?.task_id ?? '';
                 await wsClient.updateTemplateCard(frame, {
                     card_type: 'button_interaction',
-                    main_title: { title: isAllow ? '✅ 已允许' : '❌ 已拒绝' },
-                    sub_title_text: `权限请求已${isAllow ? '允许' : '拒绝'}`,
+                    main_title: { title: label },
+                    sub_title_text: `权限请求${label}`,
                     task_id: taskId,
                     button_list: [
-                        { text: isAllow ? '✅ 已允许' : '✅ 允许', style: 1, key: `perm_allow_${requestId}`, disabled: true },
-                        { text: !isAllow ? '❌ 已拒绝' : '❌ 拒绝', style: 3, key: `perm_deny_${requestId}`, disabled: true },
+                        { text: '✅ 允许', style: 1, key: `perm_allow_${requestId}`, disabled: true },
+                        { text: '✅ 全部允许', style: 1, key: `perm_allowall_${requestId}`, disabled: true },
+                        { text: '❌ 拒绝', style: 3, key: `perm_deny_${requestId}`, disabled: true },
                     ],
                 });
             } catch (err) {

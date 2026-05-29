@@ -123,8 +123,13 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
       if (req.method === 'POST' && req.url === '/permission-decision') {
         try {
           const body = await readBody(req);
-          const { request_id, decision } = body;
-          log.info(`Permission decision: ${request_id} → ${decision}`);
+          const { request_id, decision, allow_all } = body;
+          log.info(`Permission decision: ${request_id} → ${decision}${allow_all ? ' (allow_all)' : ''}`);
+          if (allow_all && decision === 'allow') {
+            // "全部允许": resolve all pending + enable auto-allow
+            const { resolveAllPending } = await import('../hook/permission-server.js');
+            resolveAllPending(lastChatId || '', 'allow');
+          }
           resolvePermission(request_id, decision);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));

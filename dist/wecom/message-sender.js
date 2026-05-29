@@ -279,6 +279,7 @@ export function createWecomSender(wsClient) {
                         task_id: `perm_${requestId}`,
                         button_list: [
                             { text: '✅ 允许', style: 1, key: `perm_allow_${requestId}` },
+                            { text: '✅ 全部允许', style: 1, key: `perm_allowall_${requestId}` },
                             { text: '❌ 拒绝', style: 3, key: `perm_deny_${requestId}` },
                         ],
                     },
@@ -287,8 +288,6 @@ export function createWecomSender(wsClient) {
             catch (err) {
                 log.error('Failed to send permission card:', err);
             }
-            // 企业微信通过 sendMessage 发送的模板卡片没有可追踪的 messageId。
-            // 权限卡片的更新不依赖 messageId，而是通过 template_card_event 事件的回调帧完成（见 event-handler.ts）。
             return '';
         },
         async updatePermissionCard(params) {

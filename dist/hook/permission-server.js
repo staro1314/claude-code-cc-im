@@ -64,6 +64,26 @@ export function resolveLatestPermission(chatId, decision) {
         return null;
     return resolvePermissionById(oldest.id, decision);
 }
+// "全部允许": resolve ALL pending requests for a chatId + auto-allow future ones
+const autoAllowChats = new Set();
+export function resolveAllPending(chatId, decision) {
+    const ids = chatIdIndex.get(chatId);
+    if (ids && ids.size > 0) {
+        for (const id of [...ids]) {
+            resolvePermissionById(id, decision);
+        }
+    }
+    if (decision === 'allow') {
+        autoAllowChats.add(chatId);
+        log.info(`Auto-allow enabled for chat: ${chatId}`);
+    }
+}
+export function isAutoAllow(chatId) {
+    return autoAllowChats.has(chatId);
+}
+export function clearAutoAllow(chatId) {
+    autoAllowChats.delete(chatId);
+}
 export function getPendingCount(chatId) {
     return chatIdIndex.get(chatId)?.size ?? 0;
 }
@@ -134,6 +154,12 @@ async function handleRequest(req, res) {
                 : undefined;
             const resolvedPlatform = platform ?? 'feishu';
             const platformSender = senders.get(resolvedPlatform);
+            // Auto-allow: 如果该 chat 已点击"全部允许"，直接放行
+            if (autoAllowChats.has(chatId)) {
+                log.info(`Auto-allow for chat ${chatId}, tool: ${toolName}`);
+                sendJson(res, 200, { decision: 'allow' });
+                return;
+            }
             const id = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             const decision = await new Promise((resolve) => {
                 if (!platformSender) {
