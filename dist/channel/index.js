@@ -81,14 +81,7 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
-        updateHeartbeatCard: async (chatId, sid, text, frame, finish) => {
-            if (!wecomWsClient || !frame) return;
-            try {
-                await wecomWsClient.replyStream(frame, sid, text, finish);
-            } catch (err) {
-                log.debug(`Stream failed: ${err.message}`);
-            }
-        },
+        updateHeartbeatCard: null,
     });
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 
@@ -124,36 +117,15 @@ export async function runChannel() {
     });
     sessionWatcher.start().catch(err => log.warn('Session watcher start failed:', err));
 
-    // Update watcher's chatId and save frame when WeChat Work messages arrive
+    // Update watcher's chatId when WeChat Work messages arrive
     if (wecomWsClient) {
-        wecomWsClient.on('message.text', async (frame) => {
+        wecomWsClient.on('message.text', (frame) => {
             const chatId = frame.body?.chatid || frame.body?.from?.userid;
-            if (chatId) {
-                sessionWatcher.setChatId(chatId);
-                // Save frame to bridge for template card updates
-                try {
-                    await fetch(`http://127.0.0.1:${bridgeServer.port}/set-frame`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ chat_id: chatId, frame: { headers: frame.headers, body: frame.body, cmd: frame.cmd } }),
-                        signal: AbortSignal.timeout(2000),
-                    });
-                } catch { /* ignore */ }
-            }
+            if (chatId) sessionWatcher.setChatId(chatId);
         });
-        wecomWsClient.on('message.voice', async (frame) => {
+        wecomWsClient.on('message.voice', (frame) => {
             const chatId = frame.body?.chatid || frame.body?.from?.userid;
-            if (chatId) {
-                sessionWatcher.setChatId(chatId);
-                try {
-                    await fetch(`http://127.0.0.1:${bridgeServer.port}/set-frame`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ chat_id: chatId, frame: { headers: frame.headers, body: frame.body, cmd: frame.cmd } }),
-                        signal: AbortSignal.timeout(2000),
-                    });
-                } catch { /* ignore */ }
-            }
+            if (chatId) sessionWatcher.setChatId(chatId);
         });
     }
 

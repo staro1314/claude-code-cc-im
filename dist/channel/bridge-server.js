@@ -41,8 +41,9 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
   let currentFrame = null;
   // Current stream ID for replyStream
   let streamId = '';
-  // Accumulated lines for streaming content
+  // Accumulated lines for batch send
   let streamLines = [];
+  let streamFlushTimer = null;
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -139,49 +140,43 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → stream to WeChat Work
+      // Tool event notification → buffer and batch-send to WeChat Work
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
           const { chat_id, tool_name, notification } = body;
           const chatId = chat_id || lastChatId;
-
-          if (tool_name === 'heartbeat-done') {
-            // 结束流式
-            if (currentFrame && updateHeartbeatCard) {
-              await updateHeartbeatCard(chatId, streamId, '✅ 处理完成', currentFrame, true);
-            }
-            streamId = '';
-            streamLines = [];
-            res.writeHead(200);
-            res.end(JSON.stringify({ ok: true }));
-            return;
-          }
-
           if (!chatId || !notification) {
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 累积内容
-          if (tool_name !== 'heartbeat') {
-            streamLines.push(notification);
-            if (streamLines.length > 15) streamLines = streamLines.slice(-15);
+          // 心跳单独发送
+          if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
+            await sendTextReply(chatId, notification);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+            return;
           }
 
-          // 用 replyStream 流式更新同一条消息
-          if (currentFrame && updateHeartbeatCard) {
-            if (!streamId) streamId = `exec_${Date.now()}`;
-            const content = (tool_name === 'heartbeat')
-              ? notification
-              : streamLines.slice(-10).join('\n');
-            await updateHeartbeatCard(chatId, streamId, content, currentFrame, false);
-          } else {
-            // 无 frame 降级为文本
-            await sendTextReply(chatId, notification);
+          // 普通事件：缓冲 1 秒后批量发送
+          streamLines.push(notification);
+          if (streamLines.length > 15) streamLines = streamLines.slice(-15);
+          if (!streamFlushTimer) {
+            streamFlushTimer = setTimeout(async () => {
+              streamFlushTimer = null;
+              if (streamLines.length === 0) return;
+              const batch = streamLines.splice(0, streamLines.length);
+              try {
+                await sendTextReply(chatId, batch.join('\n'));
+              } catch (err) {
+                log.error('Batch send error:', err);
+              }
+            }, 1000);
+            streamFlushTimer.unref?.();
           }
-          log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+          log.debug(`Tool event buffered → chat=${chatId}: ${tool_name}`);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
