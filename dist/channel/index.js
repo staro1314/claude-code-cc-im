@@ -85,14 +85,13 @@ export async function runChannel() {
             if (!wecomWsClient) return '';
             try {
                 if (existingTaskId && frame) {
-                    // 更新已有卡片（需要 frame 提供 req_id）
+                    // 更新已有卡片
                     await wecomWsClient.updateTemplateCard(frame, {
                         card_type: 'text_notice',
-                        main_title: { title: '⏳ 实时执行流' },
+                        main_title: { title: '⏳ 实时执行流', desc: '' },
                         sub_title_text: text,
                         task_id: existingTaskId,
                     });
-                    log.debug(`Card updated: taskId=${existingTaskId}`);
                     return existingTaskId;
                 } else {
                     // 发送新卡片
@@ -100,15 +99,15 @@ export async function runChannel() {
                         msgtype: 'template_card',
                         template_card: {
                             card_type: 'text_notice',
-                            main_title: { title: '⏳ 实时执行流' },
+                            main_title: { title: '⏳ 实时执行流', desc: '' },
                             sub_title_text: text,
                         },
                     });
-                    log.debug(`Card sent: result=${JSON.stringify(result)?.slice(0, 200)}`);
-                    return result?.task_id ?? result?.msgid ?? '';
+                    log.debug(`Card sent: result=${JSON.stringify(result)?.slice(0, 300)}`);
+                    return result?.task_id ?? '';
                 }
             } catch (err) {
-                log.warn(`Card update failed: errcode=${err.errcode} msg=${err.message}`);
+                log.warn(`Card failed: ${err.errcode || err.message}`);
                 return '';
             }
         },
