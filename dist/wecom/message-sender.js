@@ -269,18 +269,24 @@ export function createWecomSender(wsClient) {
         },
         async sendPermissionCard(chatId, requestId, toolName, toolInput) {
             const inputSummary = buildInputSummary(toolName, toolInput);
+            // 动态生成按钮文案
+            const actionMap = {
+                Bash: '执行', Edit: '修改', Write: '写入',
+                Read: '读取', Grep: '搜索', Glob: '搜索',
+            };
+            const action = actionMap[toolName] || '操作';
             try {
                 await wsClient.sendMessage(chatId, {
                     msgtype: 'template_card',
                     template_card: {
                         card_type: 'button_interaction',
-                        main_title: { title: `🔐 权限确认 - ${toolName}` },
-                        sub_title_text: inputSummary.length > 200 ? inputSummary.slice(0, 200) + '...' : inputSummary,
+                        main_title: { title: `🔐 ${toolName} - 请求${action}` },
+                        sub_title_text: inputSummary.length > 300 ? inputSummary.slice(0, 300) + '...' : inputSummary,
                         task_id: `perm_${requestId}`,
                         button_list: [
-                            { text: '✅ 允许', style: 1, key: `perm_allow_${requestId}` },
-                            { text: '✅ 全部允许', style: 1, key: `perm_allowall_${requestId}` },
-                            { text: '❌ 拒绝', style: 3, key: `perm_deny_${requestId}` },
+                            { text: `允许${action}`, style: 1, key: `perm_allow_${requestId}` },
+                            { text: '始终允许', style: 1, key: `perm_allowall_${requestId}` },
+                            { text: '拒绝', style: 3, key: `perm_deny_${requestId}` },
                         ],
                     },
                 });

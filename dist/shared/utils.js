@@ -71,21 +71,37 @@ export function splitLongContent(text, maxLen) {
  */
 export function buildInputSummary(toolName, toolInput) {
     if (toolName === 'Bash' && toolInput.command) {
-        return String(toolInput.command);
+        return `执行命令:\n${String(toolInput.command)}`;
     }
     if (toolName === 'Write' && toolInput.file_path) {
-        return `文件: ${toolInput.file_path}\n内容长度: ${String(toolInput.content ?? '').length} 字符`;
+        const content = String(toolInput.content ?? '');
+        const lines = content.split('\n');
+        const preview = lines.slice(0, 10).join('\n');
+        return `写入文件: ${toolInput.file_path}\n${lines.length} 行\n\n${preview.length > 300 ? preview.slice(0, 300) + '...' : preview}`;
     }
     if (toolName === 'Edit' && toolInput.file_path) {
-        return `文件: ${toolInput.file_path}`;
+        const oldStr = String(toolInput.old_string ?? '');
+        const newStr = String(toolInput.new_string ?? '');
+        const oldLines = oldStr.split('\n');
+        const newLines = newStr.split('\n');
+        let diff = '';
+        if (oldStr) diff += oldLines.map(l => `- ${l}`).join('\n');
+        if (oldStr && newStr) diff += '\n';
+        if (newStr) diff += newLines.map(l => `+ ${l}`).join('\n');
+        const diffPreview = diff.length > 400 ? diff.slice(0, 400) + '...' : diff;
+        return `修改文件: ${toolInput.file_path}\n-${oldLines.length}/+${newLines.length} 行\n\n${diffPreview}`;
+    }
+    if (toolName === 'Read' && toolInput.file_path) {
+        const parts = [`读取文件: ${toolInput.file_path}`];
+        if (toolInput.offset) parts.push(`从第 ${toolInput.offset} 行`);
+        if (toolInput.limit) parts.push(`读取 ${toolInput.limit} 行`);
+        return parts.join(' ');
     }
     const keys = Object.keys(toolInput);
-    if (keys.length === 0) {
-        return '(无参数)';
-    }
+    if (keys.length === 0) return '(无参数)';
     const lines = keys.slice(0, 5).map((k) => {
         const v = String(toolInput[k] ?? '');
-        return `${k}: ${v.length > 200 ? v.slice(0, 200) + '...' : v}`;
+        return `${k}: ${v.length > 100 ? v.slice(0, 100) + '...' : v}`;
     });
     return lines.join('\n');
 }
