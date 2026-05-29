@@ -21,6 +21,7 @@ import { SessionWatcher } from './session-watcher.js';
 import { startPermissionServer } from '../hook/permission-server.js';
 import { ensureHookConfigured } from '../hook/ensure-hook.js';
 import { initLogger, createLogger, closeLogger } from '../logger.js';
+import { createWecomSender } from '../wecom/message-sender.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
