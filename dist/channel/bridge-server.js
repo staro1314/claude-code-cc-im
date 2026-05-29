@@ -137,48 +137,16 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → stream via template card update
+      // Tool event notification → forward to WeChat Work
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
           const { chat_id, tool_name, notification } = body;
           const chatId = chat_id || lastChatId;
-
-          // 心跳完成：重置卡片
-          if (tool_name === 'heartbeat-done') {
-            streamLines = [];
-            heartbeatTaskId = '';
-            res.writeHead(200);
-            res.end(JSON.stringify({ ok: true }));
-            return;
+          if (chatId && notification) {
+            log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+            await sendTextReply(chatId, notification);
           }
-
-          if (!chatId || !notification) {
-            res.writeHead(200);
-            res.end(JSON.stringify({ ok: true }));
-            return;
-          }
-
-          // 普通事件：累积到流式卡片
-          if (tool_name !== 'heartbeat') {
-            streamLines.push(notification);
-            if (streamLines.length > 15) streamLines = streamLines.slice(-15);
-          }
-
-          // 构建卡片内容
-          const cardContent = (tool_name === 'heartbeat')
-            ? notification
-            : streamLines.slice(-10).join('\n');
-
-          // 用 frame 更新模板卡片
-          if (currentFrame && updateHeartbeatCard) {
-            if (!heartbeatTaskId) {
-              heartbeatTaskId = await updateHeartbeatCard(chatId, '', cardContent, currentFrame);
-            } else {
-              await updateHeartbeatCard(chatId, heartbeatTaskId, cardContent, currentFrame);
-            }
-          }
-          log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {

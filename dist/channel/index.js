@@ -81,18 +81,7 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
-        updateHeartbeatCard: async (chatId, existingTaskId, text, frame) => {
-            if (!wecomWsClient || !frame) return '';
-            const streamId = existingTaskId || `stream_${Date.now()}`;
-            const isDone = text === '✅ 模型处理完成';
-            try {
-                await wecomWsClient.replyStream(frame, streamId, text, isDone);
-                return streamId;
-            } catch (err) {
-                log.warn(`Stream failed: ${err.message}`);
-                return '';
-            }
-        },
+        updateHeartbeatCard: null,
     });
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 
