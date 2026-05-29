@@ -62,6 +62,28 @@ async function downloadWecomImage(wsClient, url, aesKey) {
     return imagePath;
 }
 
+// 发送停止卡片作为加载指示器
+let stopCardTaskId = '';
+async function sendStopCard(sender, chatId) {
+    stopCardTaskId = `stop_${Date.now()}`;
+    try {
+        await sender.wsClient.sendMessage(chatId, {
+            msgtype: 'template_card',
+            template_card: {
+                card_type: 'button_interaction',
+                main_title: { title: '⏳ Claude Code 处理中' },
+                sub_title_text: '模型正在处理您的请求...',
+                task_id: stopCardTaskId,
+                button_list: [
+                    { text: '停止', style: 3, key: `stop_${stopCardTaskId}` },
+                ],
+            },
+        });
+    } catch (err) {
+        log.warn('Failed to send stop card:', err);
+    }
+}
+
 /**
  * Setup WeChat Work handlers in channel mode.
  * Messages are forwarded to the channel MCP server instead of spawning Claude.
@@ -151,6 +173,8 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         const forwarded = await tryChannelForward(userId, chatId, cleanText, msgId, isGroup);
         if (forwarded) {
             await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            // 显示停止卡片作为动态加载指示器
+            sendStopCard(sender, chatId);
             return;
         }
 
@@ -205,6 +229,7 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         const forwarded = await tryChannelForward(userId, chatId, prompt, msgId, isGroup);
         if (forwarded) {
             await sender.sendTextReply(chatId, '📤 图片已发送到 Claude Code 会话');
+            sendStopCard(sender, chatId);
         } else if (options?.onFallback) {
             await options.onFallback(frame, prompt, userId, chatId, msgId, isGroup);
         }
@@ -252,6 +277,7 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         const forwarded = await tryChannelForward(userId, chatId, prompt, msgId, isGroup);
         if (forwarded) {
             await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            sendStopCard(sender, chatId);
         } else if (options?.onFallback) {
             await options.onFallback(frame, prompt, userId, chatId, msgId, isGroup);
         }
