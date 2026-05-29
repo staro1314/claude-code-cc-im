@@ -63,21 +63,13 @@ export async function runChannel() {
     const bridgeServer = await startBridgeServer({
         port: bridgePort,
         sendTextReply: async (chatId, text) => {
-            // 直接用 wecomWsClient 发送，不依赖 globalWsClient
-            if (!wecomWsClient) {
-                log.warn('sendTextReply: wecomWsClient not available yet');
-                return;
-            }
-            try {
-                await wecomWsClient.sendMessage(chatId, {
-                    msgtype: 'text',
-                    text: { content: text },
-                });
-            } catch (err) {
-                log.error('sendTextReply failed:', err);
-            }
+            // Dynamically import to avoid circular deps
+            const { sendTextReply } = await import('../wecom/message-sender.js');
+            await sendTextReply(chatId, text);
         },
         sendPermissionCard: async (chatId, requestId, toolName, toolInput) => {
+            // Dynamically import to avoid circular deps
+            const { createWecomSender } = await import('../wecom/message-sender.js');
             if (wecomWsClient) {
                 const sender = createWecomSender(wecomWsClient);
                 await sender.sendPermissionCard(chatId, requestId, toolName, toolInput);
