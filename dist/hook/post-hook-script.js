@@ -33,8 +33,29 @@ function truncate(s, max) { return s.length > max ? s.slice(0, max) + '...' : s;
 function formatResult(toolName, result) {
     if (!result) return '';
     const text = typeof result === 'string' ? result : JSON.stringify(result);
-    const trimmed = truncate(text.replace(/\n+/g, ' ').trim(), 200);
-    return trimmed ? ` → ${trimmed}` : '';
+    if (!text.trim()) return '';
+    switch (toolName) {
+        case 'Bash': {
+            const preview = truncate(text.trim(), 600);
+            return `\n\`\`\`\n${preview}\n\`\`\``;
+        }
+        case 'Read': {
+            const preview = truncate(text.trim(), 600);
+            return `\n\`\`\`\n${preview}\n\`\`\``;
+        }
+        case 'Grep': case 'Glob': {
+            const preview = truncate(text.trim(), 400);
+            return `\n${preview}`;
+        }
+        case 'Edit': case 'Write': {
+            const preview = truncate(text.replace(/\n+/g, ' ').trim(), 200);
+            return preview ? ` → ${preview}` : '';
+        }
+        default: {
+            const preview = truncate(text.replace(/\n+/g, ' ').trim(), 300);
+            return preview ? ` → ${preview}` : '';
+        }
+    }
 }
 
 function notifyToolResult(chatId, toolName, result) {

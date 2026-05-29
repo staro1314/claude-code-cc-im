@@ -99,19 +99,61 @@ function getToolEmoji(name) {
     return map[name] || '🔧';
 }
 function truncate(s, max) { return s.length > max ? s.slice(0, max) + '...' : s; }
+
+function formatDiff(oldStr, newStr) {
+    if (!oldStr && !newStr) return '';
+    const oldLines = (oldStr || '').split('\n');
+    const newLines = (newStr || '').split('\n');
+    const parts = [];
+    if (oldLines.length > 0 && oldStr) {
+        parts.push(oldLines.map(l => `- ${l}`).join('\n'));
+    }
+    if (newLines.length > 0 && newStr) {
+        parts.push(newLines.map(l => `+ ${l}`).join('\n'));
+    }
+    return parts.join('\n');
+}
+
 function formatToolDetail(name, input) {
     if (!input) return '';
     switch (name) {
-        case 'Read': { const fp = input.file_path ?? ''; const parts = [fp]; if (input.offset) parts.push(`L${input.offset}`); if (input.limit) parts.push(`${input.limit}行`); return fp ? ` → ${parts.join(' ')}` : ''; }
-        case 'Edit': { const fp = input.file_path ?? ''; const oc = (String(input.old_string ?? '')).split('\n').length; const nc = (String(input.new_string ?? '')).split('\n').length; return fp ? ` → ${fp} (-${oc}/+${nc} 行)` : ''; }
-        case 'Write': { const fp = input.file_path ?? ''; const len = String(input.content ?? '').length; return fp ? ` → ${fp} (${len}字符)` : ''; }
-        case 'Bash': return input.command ? ` → ${truncate(String(input.command), 60)}` : '';
+        case 'Read': {
+            const fp = input.file_path ?? '';
+            const parts = [fp];
+            if (input.offset) parts.push(`L${input.offset}`);
+            if (input.limit) parts.push(`${input.limit}行`);
+            return fp ? ` → ${parts.join(' ')}` : '';
+        }
+        case 'Edit': {
+            const fp = input.file_path ?? '';
+            if (!fp) return '';
+            const oldStr = String(input.old_string ?? '');
+            const newStr = String(input.new_string ?? '');
+            const oc = oldStr.split('\n').length;
+            const nc = newStr.split('\n').length;
+            const header = `${fp} (-${oc}/+${nc} 行)`;
+            const diff = formatDiff(oldStr, newStr);
+            const diffPreview = truncate(diff, 800);
+            return ` → ${header}\n\`\`\`diff\n${diffPreview}\n\`\`\``;
+        }
+        case 'Write': {
+            const fp = input.file_path ?? '';
+            const content = String(input.content ?? '');
+            const lines = content.split('\n').length;
+            const preview = truncate(content, 500);
+            return fp ? ` → ${fp} (${lines}行)\n\`\`\`\n${preview}\n\`\`\`` : '';
+        }
+        case 'Bash': return input.command ? ` → \`${truncate(String(input.command), 120)}\`` : '';
         case 'Grep': case 'Glob': return input.pattern ? ` → ${input.pattern}` : '';
-        case 'WebFetch': return input.url ? ` → ${truncate(String(input.url), 60)}` : '';
+        case 'WebFetch': return input.url ? ` → ${truncate(String(input.url), 80)}` : '';
         case 'WebSearch': return input.query ? ` → ${input.query}` : '';
-        case 'Agent': return input.prompt ? ` → ${truncate(String(input.prompt), 60)}` : '';
-        case 'Task': return input.description ? ` → ${truncate(String(input.description), 40)}` : '';
-        default: return '';
+        case 'Agent': return input.prompt ? ` → ${truncate(String(input.prompt), 100)}` : '';
+        case 'Task': return input.description ? ` → ${truncate(String(input.description), 60)}` : '';
+        default: {
+            const keys = Object.keys(input).slice(0, 3);
+            const summary = keys.map(k => `${k}=${truncate(String(input[k] ?? ''), 40)}`).join(', ');
+            return summary ? ` → ${summary}` : '';
+        }
     }
 }
 function notifyToolUse(chatId, toolName, toolInput) {

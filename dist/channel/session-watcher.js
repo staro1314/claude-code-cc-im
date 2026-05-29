@@ -14,7 +14,7 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('SessionWatcher');
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-const POLL_INTERVAL = 2000; // 2 seconds
+const POLL_INTERVAL = 1000; // 1 second for better streaming feel
 
 export class SessionWatcher {
   /** @type {Map<string, number>} filePath → last known file size */
@@ -124,21 +124,29 @@ export class SessionWatcher {
 
       const lines = buf.toString('utf-8').split('\n');
       let thinkingFound = 0;
+      let textFound = 0;
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          // Thinking 在 type=assistant 消息的 content 块里
           if (event.type === 'assistant' && event.uuid && !this.#sentUuids.has(event.uuid)) {
-            const thinking = event.message?.content?.find?.(b => b.type === 'thinking')?.thinking;
+            const content = event.message?.content;
+            if (!Array.isArray(content)) continue;
+            const thinking = content.find(b => b.type === 'thinking')?.thinking;
             if (thinking) {
               thinkingFound++;
               await this.#handleThinkingEvent(event, thinking);
+            }
+            const textBlocks = content.filter(b => b.type === 'text' && b.text);
+            if (textBlocks.length > 0) {
+              textFound++;
+              await this.#handleTextEvent(event, textBlocks);
             }
           }
         } catch { /* malformed */ }
       }
       if (thinkingFound > 0) log.info(`Pushed ${thinkingFound} thinking events`);
+      if (textFound > 0) log.info(`Pushed ${textFound} text events`);
     } catch (err) { log.debug(`Read error: ${err.message}`); }
     finally { await fh?.close(); }
   }
@@ -158,6 +166,23 @@ export class SessionWatcher {
     const truncated = thinking.length > maxLen ? thinking.slice(0, maxLen) + '...' : thinking;
     const notification = `🧠 **模型思考**${elapsed}\n\n${truncated}`;
     await this.#push(notification);
+  }
+
+  async #handleTextEvent(event, textBlocks) {
+    this.#sentUuids.add(event.uuid);
+    if (this.#sentUuids.size > this.#maxSentUuids) {
+      const first = this.#sentUuids.values().next().value;
+      if (first !== undefined) this.#sentUuids.delete(first);
+    }
+    const fullText = textBlocks.map(b => b.text).join('\n');
+    if (!fullText.trim()) return;
+    const elapsed = event.timestamp
+      ? ` (${new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })})`
+      : '';
+    const maxLen = 1500;
+    const truncated = fullText.length > maxLen ? fullText.slice(0, maxLen) + '...' : fullText;
+    const notification = `💬 **模型回复**${elapsed}\n\n${truncated}`;
+    await this.#push(notification, 'text');
   }
 
   async #sendHeartbeat(elapsedSec) {

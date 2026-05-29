@@ -150,7 +150,12 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         // Try channel forward
         const forwarded = await tryChannelForward(userId, chatId, cleanText, msgId, isGroup);
         if (forwarded) {
-            await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            // 初始化流式会话（如果有回调），否则发文本确认
+            if (options?.onStreamInit && frame) {
+                options.onStreamInit(frame);
+            } else {
+                await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            }
             return;
         }
 
@@ -204,7 +209,11 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         const prompt = `用户发送了一张图片，已保存到 ${imagePath}。请用 Read 工具查看并分析图片内容。`;
         const forwarded = await tryChannelForward(userId, chatId, prompt, msgId, isGroup);
         if (forwarded) {
-            await sender.sendTextReply(chatId, '📤 图片已发送到 Claude Code 会话');
+            if (options?.onStreamInit && frame) {
+                options.onStreamInit(frame);
+            } else {
+                await sender.sendTextReply(chatId, '📤 图片已发送到 Claude Code 会话');
+            }
         } else if (options?.onFallback) {
             await options.onFallback(frame, prompt, userId, chatId, msgId, isGroup);
         }
@@ -251,7 +260,11 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
 
         const forwarded = await tryChannelForward(userId, chatId, prompt, msgId, isGroup);
         if (forwarded) {
-            await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            if (options?.onStreamInit && frame) {
+                options.onStreamInit(frame);
+            } else {
+                await sender.sendTextReply(chatId, '📤 已发送到 Claude Code 会话');
+            }
         } else if (options?.onFallback) {
             await options.onFallback(frame, prompt, userId, chatId, msgId, isGroup);
         }

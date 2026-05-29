@@ -32,9 +32,21 @@ const log = createLogger('Bridge');
  * @param {Function} options.resolvePermission - (requestId, decision) => void
  * @returns {Promise<{port: number, close: () => Promise<void>}>}
  */
-export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard }) {
+export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard, streamController }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
+
+  // Stream state: accumulate tool events for progressive display
+  let streamLines = [];
+  const MAX_STREAM_LINES = 40;
+
+  function appendStreamLine(line) {
+    streamLines.push(line);
+    if (streamLines.length > MAX_STREAM_LINES) streamLines.shift();
+    return streamLines.join('\n');
+  }
+
+  function resetStreamState() { streamLines = []; }
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -46,7 +58,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Claude's reply → forward to WeChat Work
+      // Claude's reply → complete stream or forward as text
       if (req.method === 'POST' && req.url === '/reply') {
         try {
           const body = await readBody(req);
@@ -57,14 +69,23 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
           lastChatId = chat_id;
-          // Write chatId to file so hook-script can read it in channel mode
           try {
             const chatIdFile = join(homedir(), '.cc-im', 'active-chat-id');
             mkdirSync(join(homedir(), '.cc-im'), { recursive: true });
             writeFileSync(chatIdFile, chat_id, 'utf-8');
           } catch { /* ignore */ }
           log.debug(`Channel reply → chat_id=${chat_id}, len=${text.length}`);
-          await sendTextReply(chat_id, text);
+          if (streamController?.isActive?.()) {
+            try {
+              await streamController.complete(text);
+              resetStreamState();
+            } catch (err) {
+              log.warn('Stream complete failed, fallback to text:', err);
+              await sendTextReply(chat_id, text);
+            }
+          } else {
+            await sendTextReply(chat_id, text);
+          }
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
@@ -115,7 +136,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Tool event notification → streaming via individual messages to WeChat Work
+      // Tool event notification → stream update or fallback to text
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
           const body = await readBody(req);
@@ -127,25 +148,34 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 心跳：发送状态
-          if (tool_name === 'heartbeat') {
-            await sendTextReply(chatId, notification);
+          // 心跳：作为 toolNote 显示在流式消息底部
+          if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
+            if (streamController?.isActive?.()) {
+              try {
+                const content = streamLines.length > 0 ? streamLines.join('\n') : '⏳ 处理中...';
+                await streamController.update(content, notification);
+              } catch { await sendTextReply(chatId, notification); }
+            } else {
+              await sendTextReply(chatId, notification);
+            }
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 完成：发送完成标记
-          if (tool_name === 'heartbeat-done') {
-            await sendTextReply(chatId, notification);
-            res.writeHead(200);
-            res.end(JSON.stringify({ ok: true }));
-            return;
-          }
-
-          // 所有其他事件：立即发送（实现流式效果）
+          // 所有其他事件：累积到流式消息
           log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
-          await sendTextReply(chatId, notification);
+          if (streamController?.isActive?.()) {
+            const content = appendStreamLine(notification);
+            try {
+              await streamController.update(content);
+            } catch (err) {
+              log.warn('Stream update failed, fallback:', err);
+              await sendTextReply(chatId, notification);
+            }
+          } else {
+            await sendTextReply(chatId, notification);
+          }
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
