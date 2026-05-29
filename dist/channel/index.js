@@ -21,7 +21,6 @@ import { SessionWatcher } from './session-watcher.js';
 import { startPermissionServer } from '../hook/permission-server.js';
 import { ensureHookConfigured } from '../hook/ensure-hook.js';
 import { initLogger, createLogger, closeLogger } from '../logger.js';
-import { createWecomSender } from '../wecom/message-sender.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -59,41 +58,23 @@ export async function runChannel() {
     // Start bridge server (for channel ↔ WeChat Work communication)
     const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT || '0', 10) || 18790;
 
-    // Stream controller: deferred - sender is set after wsClient connects
-    let channelSender = null;
-    let streamActive = false;
-
-    const streamController = {
-        isActive: () => streamActive && channelSender != null,
-        update: async (content, toolNote) => {
-            if (!channelSender || !streamActive) return false;
-            try {
-                const sent = await channelSender.sendStreamUpdate(content, toolNote);
-                // sendStreamUpdate 内部 session 为 null 时静默返回，视为失败
-                return sent !== false;
-            } catch {
-                streamActive = false;
-                return false;
-            }
-        },
-        complete: async (text) => {
-            if (!channelSender || !streamActive) return false;
-            try {
-                await channelSender.sendStreamComplete(text);
-                streamActive = false;
-                return true;
-            } catch {
-                streamActive = false;
-                return false;
-            }
-        },
-    };
-
+    // wecomWsClient 在 initWecom 回调中设置，bridge 回调通过闭包引用
     const bridgeServer = await startBridgeServer({
         port: bridgePort,
         sendTextReply: async (chatId, text) => {
-            const { sendTextReply } = await import('../wecom/message-sender.js');
-            await sendTextReply(chatId, text);
+            // 直接用 wecomWsClient 发送，不依赖 globalWsClient
+            if (!wecomWsClient) {
+                log.warn('sendTextReply: wecomWsClient not available yet');
+                return;
+            }
+            try {
+                await wecomWsClient.sendMessage(chatId, {
+                    msgtype: 'text',
+                    text: { content: text },
+                });
+            } catch (err) {
+                log.error('sendTextReply failed:', err);
+            }
         },
         sendPermissionCard: async (chatId, requestId, toolName, toolInput) => {
             if (wecomWsClient) {
@@ -108,7 +89,6 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
-        streamController,
     });
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 
@@ -128,24 +108,7 @@ export async function runChannel() {
     try {
         await initWecom(config, (wsClient) => {
             wecomWsClient = wsClient;
-            channelSender = createWecomSender(wsClient);
-            wecomHandle = setupWecomChannelHandlers(wsClient, config, null, {
-                onStreamInit: async (frame) => {
-                    // 如果旧流还在活跃，先结束它
-                    if (streamActive && channelSender) {
-                        try { await channelSender.sendStreamComplete('⏳ 新消息到达，处理中...'); } catch { /* ignore */ }
-                    }
-                    channelSender.initStream(frame, `ch_${Date.now()}`);
-                    streamActive = true;
-                    log.debug('Stream session initialized for channel message');
-                    try {
-                        await channelSender.sendStreamUpdate('📤 已发送到 Claude Code 会话\n⏳ 处理中...');
-                    } catch (err) {
-                        log.warn('Initial stream update failed:', err);
-                        streamActive = false;
-                    }
-                },
-            });
+            wecomHandle = setupWecomChannelHandlers(wsClient, config, null, {});
             return wecomHandle;
         });
         log.info('WeChat Work bot initialized (channel mode)');

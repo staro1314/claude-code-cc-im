@@ -32,21 +32,9 @@ const log = createLogger('Bridge');
  * @param {Function} options.resolvePermission - (requestId, decision) => void
  * @returns {Promise<{port: number, close: () => Promise<void>}>}
  */
-export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard, streamController }) {
+export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
-
-  // Stream state: accumulate tool events for progressive display
-  let streamLines = [];
-  const MAX_STREAM_LINES = 40;
-
-  function appendStreamLine(line) {
-    streamLines.push(line);
-    if (streamLines.length > MAX_STREAM_LINES) streamLines.shift();
-    return streamLines.join('\n');
-  }
-
-  function resetStreamState() { streamLines = []; }
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -75,17 +63,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             writeFileSync(chatIdFile, chat_id, 'utf-8');
           } catch { /* ignore */ }
           log.debug(`Channel reply → chat_id=${chat_id}, len=${text.length}`);
-          if (streamController?.isActive?.()) {
-            try {
-              await streamController.complete(text);
-              resetStreamState();
-            } catch (err) {
-              log.warn('Stream complete failed, fallback to text:', err);
-              await sendTextReply(chat_id, text);
-            }
-          } else {
-            await sendTextReply(chat_id, text);
-          }
+          await sendTextReply(chat_id, text);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
@@ -160,15 +138,9 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 所有其他事件：累积到流式消息，失败则 fallback 文本
+          // 所有其他事件：直接发送文本
           log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
-          if (streamController?.isActive?.()) {
-            const content = appendStreamLine(notification);
-            const ok = await streamController.update(content);
-            if (!ok) await sendTextReply(chatId, notification);
-          } else {
-            await sendTextReply(chatId, notification);
-          }
+          await sendTextReply(chatId, notification);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
