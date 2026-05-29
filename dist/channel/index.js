@@ -81,7 +81,6 @@ export async function runChannel() {
             const { resolvePermissionById } = require('../hook/permission-server.js');
             resolvePermissionById(requestId, decision);
         },
-        updateHeartbeatCard: null,
     });
     log.info(`Bridge server started on port ${bridgeServer.port}`);
 

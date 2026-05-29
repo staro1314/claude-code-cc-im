@@ -35,12 +35,6 @@ const log = createLogger('Bridge');
 export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission, updateHeartbeatCard }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
-  // Track heartbeat card for in-place update
-  let heartbeatTaskId = '';
-  // Current message frame for streaming (from incoming WeChat Work message)
-  let currentFrame = null;
-  // Current stream ID for replyStream
-  let streamId = '';
   // Accumulated lines for batch send
   let streamLines = [];
   let streamFlushTimer = null;
@@ -124,22 +118,6 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
         return;
       }
 
-      // Save current message frame for template card updates
-      if (req.method === 'POST' && req.url === '/set-frame') {
-        try {
-          const body = await readBody(req);
-          currentFrame = body.frame || null;
-          lastChatId = body.chat_id || lastChatId;
-          log.debug(`Frame saved: chat=${lastChatId}`);
-          res.writeHead(200);
-          res.end(JSON.stringify({ ok: true }));
-        } catch (err) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: err.message }));
-        }
-        return;
-      }
-
       // Tool event notification → buffer and batch-send to WeChat Work
       if (req.method === 'POST' && req.url === '/tool-event') {
         try {
@@ -152,17 +130,24 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 心跳单独发送
+          // 心跳/完成：立即发送
           if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
+            // 先 flush 缓冲区
+            if (streamLines.length > 0 && streamFlushTimer) {
+              clearTimeout(streamFlushTimer);
+              streamFlushTimer = null;
+              const batch = streamLines.splice(0, streamLines.length);
+              await sendTextReply(chatId, batch.join('\n')).catch(() => {});
+            }
             await sendTextReply(chatId, notification);
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
-          // 普通事件：缓冲 1 秒后批量发送
+          // 普通事件：缓冲 2 秒后批量发送（紧凑格式）
           streamLines.push(notification);
-          if (streamLines.length > 15) streamLines = streamLines.slice(-15);
+          if (streamLines.length > 20) streamLines = streamLines.slice(-20);
           if (!streamFlushTimer) {
             streamFlushTimer = setTimeout(async () => {
               streamFlushTimer = null;
@@ -173,7 +158,7 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
               } catch (err) {
                 log.error('Batch send error:', err);
               }
-            }, 1000);
+            }, 2000);
             streamFlushTimer.unref?.();
           }
           log.debug(`Tool event buffered → chat=${chatId}: ${tool_name}`);
