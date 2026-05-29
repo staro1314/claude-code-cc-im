@@ -131,8 +131,9 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
             return;
           }
 
-          // 心跳：仅后台检测，不推送到企业微信
+          // 心跳：转发到企业微信作为加载指示器
           if (tool_name === 'heartbeat' || tool_name === 'heartbeat-done') {
+            await sendTextReply(chatId, notification);
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true }));
             return;
