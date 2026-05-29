@@ -273,8 +273,8 @@ export function createWecomSender(wsClient) {
             if (inputSummary.length > 80) {
                 try {
                     await wsClient.sendMessage(chatId, {
-                        msgtype: 'text',
-                        text: { content: `🔐 ${toolName} 请求确认:\n\n${inputSummary.slice(0, 1000)}` },
+                        msgtype: 'markdown',
+                        markdown: { content: `🔐 **${toolName}** 请求确认:\n\n${inputSummary.slice(0, 1000)}` },
                     });
                 } catch { /* ignore */ }
             }
