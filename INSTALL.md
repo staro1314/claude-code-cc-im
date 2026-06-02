@@ -61,3 +61,29 @@ npm start
 - 需要 Node.js >= 20
 - 需要预先安装 Claude Code CLI
 - 企业微信机器人需要在管理后台配置权限
+
+## 8. 配置文件说明
+
+### config.json
+复制 `config.example.json` 为 `config.json`，填入实际配置：
+```bash
+cp config.example.json config.json
+```
+
+配置项说明：
+- `claudeWorkDir`: Claude Code 工作目录
+- `allowedBaseDirs`: 允许访问的目录列表
+- `claudeCliPath`: Claude Code CLI 路径
+- `wecomBotId`: 企业微信机器人 ID
+- `wecomBotSecret`: 企业微信机器人 Secret
+- `claudeSkipPermissions`: 是否跳过权限检查（建议 true）
+
+### 启动脚本
+- `启动.bat`: Windows 启动脚本（自动检测路径）
+- `停止.bat`: Windows 停止脚本
+- `重启.bat`: Windows 重启脚本
+
+## 9. 验证安装
+1. 启动服务后，在企业微信中发送消息测试
+2. 触发 Edit/Bash 等工具，检查权限确认卡片是否正常显示
+3. 查看日志文件 `~/.cc-im/logs/` 确认服务运行状态

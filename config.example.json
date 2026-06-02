@@ -1,0 +1,8 @@
+{
+  "claudeWorkDir": "D:\project",
+  "allowedBaseDirs": ["C:\Users\yourname", "D:\project"],
+  "claudeCliPath": "C:\Users\yourname\AppData\Roaming\npm\claude.cmd",
+  "wecomBotId": "your_wecom_bot_id",
+  "wecomBotSecret": "your_wecom_bot_secret",
+  "claudeSkipPermissions": true
+}
