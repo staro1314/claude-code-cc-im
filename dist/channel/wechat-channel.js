@@ -146,6 +146,8 @@ const PermissionRequestSchema = z.object({
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params;
     log(`Permission request: ${tool_name} (${request_id})`);
+    log(`  description: ${(description || '').slice(0, 120)}`);
+    log(`  input_preview: [${input_preview ? 'LEN=' + input_preview.length : 'EMPTY/UNDEFINED'}] ${(input_preview || '').slice(0, 200)}`);
 
     // Forward to cc-im bridge for display in WeChat Work
     try {
@@ -282,7 +284,18 @@ function readBody(req) {
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 23);
-  process.stderr.write(`[${ts}] [WeChatChannel] ${msg}\n`);
+  const line = `[${ts}] [WeChatChannel] ${msg}\n`;
+  process.stderr.write(line);
+  // 同时写入文件方便调试
+  try {
+    const { appendFileSync, mkdirSync } = require('node:fs');
+    const { join } = require('node:path');
+    const { homedir } = require('node:os');
+    const logDir = join(homedir(), '.cc-im', 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const today = new Date().toISOString().slice(0, 10);
+    appendFileSync(join(logDir, `${today}.log`), line);
+  } catch {}
 }
 
 // --- Main ---

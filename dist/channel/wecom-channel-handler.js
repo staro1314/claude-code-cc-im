@@ -7,7 +7,7 @@
  *
  * Falls back to the standard handler if the channel server is not running.
  */
-import { createWecomSender, sendTextReply as wecomSendText } from '../wecom/message-sender.js';
+import { createWecomSender, sendTextReply as wecomSendText, saveLastFrame } from '../wecom/message-sender.js';
 import { AccessControl } from '../access/access-control.js';
 import { RequestQueue } from '../queue/request-queue.js';
 import { CommandHandler } from '../commands/handler.js';
@@ -194,6 +194,7 @@ export function setupWecomChannelHandlers(wsClient, config, sessionManager, opti
         const body = frame.body;
         if (!body) return;
         const { userId, chatId, text, msgId, isGroup } = extractInfo(body);
+        saveLastFrame(chatId, frame);
         await handleMessage(frame, text, userId, chatId, msgId, isGroup);
     });
 

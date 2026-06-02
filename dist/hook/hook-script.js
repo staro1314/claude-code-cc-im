@@ -19,7 +19,7 @@
  *   2 - Permission server unreachable (deny decision written to stdout)
  */
 import { request } from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { READ_ONLY_TOOLS, HOOK_EXIT_CODES } from '../constants.js';
@@ -102,14 +102,12 @@ function truncate(s, max) { return s.length > max ? s.slice(0, max) + '...' : s;
 
 function formatDiff(oldStr, newStr) {
     if (!oldStr && !newStr) return '';
-    const oldLines = (oldStr || '').split('\n');
-    const newLines = (newStr || '').split('\n');
     const parts = [];
-    if (oldLines.length > 0 && oldStr) {
-        parts.push(oldLines.map(l => `- ${l}`).join('\n'));
+    if (oldStr) {
+        parts.push(oldStr.split('\n').map(l => `- ${l}`).join('\n'));
     }
-    if (newLines.length > 0 && newStr) {
-        parts.push(newLines.map(l => `+ ${l}`).join('\n'));
+    if (newStr) {
+        parts.push(newStr.split('\n').map(l => `+ ${l}`).join('\n'));
     }
     return parts.join('\n');
 }
@@ -133,8 +131,7 @@ function formatToolDetail(name, input) {
             const nc = newStr.split('\n').length;
             const header = `${fp} (-${oc}/+${nc} 行)`;
             const diff = formatDiff(oldStr, newStr);
-            const diffPreview = truncate(diff, 800);
-            return ` → ${header}\n\`\`\`diff\n${diffPreview}\n\`\`\``;
+            return ` → ${header}\n\`\`\`diff\n${diff}\n\`\`\``;
         }
         case 'Write': {
             const fp = input.file_path ?? '';
@@ -158,15 +155,36 @@ function formatToolDetail(name, input) {
 }
 function notifyToolUse(chatId, toolName, toolInput) {
     const bridgePort = parseInt(process.env.CC_IM_BRIDGE_PORT ?? '18790', 10);
-    if (!bridgePort || !chatId) return Promise.resolve();
+    // 写入文件日志，方便调试
+    try {
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const logDir = path.join(require('node:os').homedir(), '.cc-im', 'logs');
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.appendFileSync(path.join(logDir, 'hook-debug.log'), `[${new Date().toISOString()}] notifyToolUse: tool=${toolName} chatId=${chatId} port=${bridgePort}\n`);
+    } catch {}
+    if (!bridgePort || !chatId) {
+        process.stderr.write(`[cc-im-hook] notifyToolUse SKIP: port=${bridgePort} chatId=${chatId}\n`);
+        return Promise.resolve();
+    }
     const emoji = getToolEmoji(toolName);
     const detail = formatToolDetail(toolName, toolInput);
     const notification = `${emoji} ${toolName}${detail}`;
+    process.stderr.write(`[cc-im-hook] notifyToolUse: tool=${toolName} port=${bridgePort} detail_len=${detail.length}\n`);
     const payload = JSON.stringify({ chat_id: chatId, tool_name: toolName, notification });
     return new Promise((resolve) => {
-        const req = request({ hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 3000 }, () => { resolve(); });
-        req.on('error', () => { resolve(); });
-        req.on('timeout', () => { req.destroy(); resolve(); });
+        const req = request({ hostname: '127.0.0.1', port: bridgePort, path: '/tool-event', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 3000 }, (res) => {
+            process.stderr.write(`[cc-im-hook] notifyToolUse response: ${res.statusCode}\n`);
+            resolve();
+        });
+        req.on('error', (err) => {
+            process.stderr.write(`[cc-im-hook] notifyToolUse ERROR: ${err.message}\n`);
+            resolve();
+        });
+        req.on('timeout', () => {
+            process.stderr.write(`[cc-im-hook] notifyToolUse TIMEOUT\n`);
+            req.destroy(); resolve();
+        });
         req.write(payload);
         req.end();
     });
@@ -242,6 +260,7 @@ async function main() {
         handleWecomCommand(toolInput.command);
     }
     // 推送模式下：写入 transcript_path 并推送通知
+    process.stderr.write(`[cc-im-hook] main: tool=${toolName} chatId=${chatId} pushMode=${isPushMode()} skip=${process.env.CC_IM_SKIP_PERMISSIONS}\n`);
     if (isPushMode()) {
         writeTranscriptPath(input.transcript_path);
         await notifyToolUse(chatId, toolName, toolInput);
@@ -262,11 +281,19 @@ async function main() {
     const threadRootMsgId = process.env.CC_IM_THREAD_ROOT_MSG_ID;
     const threadId = process.env.CC_IM_THREAD_ID;
     const platform = process.env.CC_IM_PLATFORM;
+    // 保存全文格式化 preview 到文件，供 bridge 读取（MCP 通知路径的 input_preview 是截断的）
+    const fullPreview = formatToolDetail(toolName, toolInput).replace(/^ → /, '');
+    try {
+        const previewDir = join(homedir(), '.cc-im');
+        mkdirSync(previewDir, { recursive: true });
+        writeFileSync(join(previewDir, `perm-preview-${chatId}.json`), JSON.stringify({ preview: fullPreview, toolName, ts: Date.now() }), 'utf-8');
+    } catch { /* ignore */ }
     try {
         const result = await httpPost(port, '/permission-request', {
             chatId,
             toolName,
             toolInput,
+            inputPreview: fullPreview,
             threadRootMsgId,
             threadId,
             platform,

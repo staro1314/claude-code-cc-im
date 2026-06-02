@@ -4,6 +4,38 @@ import { createLogger } from '../logger.js';
 import { splitLongContent, buildInputSummary } from '../shared/utils.js';
 import { MAX_WECOM_MESSAGE_LENGTH, WECOM_STREAM_TIMEOUT_MS } from '../constants.js';
 const log = createLogger('WecomSender');
+// 通过文件共享每个 chat 的最新消息 frame（跨模块实例安全，供 replyStreamWithCard 使用）
+import { writeFileSync, readFileSync, copyFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { join as pathJoin } from 'node:path';
+import { homedir } from 'node:os';
+const FRAMES_DIR = pathJoin(homedir(), '.cc-im');
+function getFramePath(id) { return pathJoin(FRAMES_DIR, `frame-${id}.json`); }
+// 消息到达时保存最新 frame
+export function saveLastFrame(chatId, frame) {
+    try {
+        mkdirSync(FRAMES_DIR, { recursive: true });
+        writeFileSync(getFramePath(chatId), JSON.stringify({ reqId: frame?.headers?.req_id }), 'utf-8');
+    } catch { /* ignore */ }
+}
+// 权限请求到达时：复制为独立 frame 文件
+function forkFrame(chatId, requestId) {
+    try {
+        const src = getFramePath(chatId);
+        readFileSync(src, 'utf-8'); // 验证源文件存在
+        copyFileSync(src, getFramePath(requestId));
+        return { headers: { req_id: JSON.parse(readFileSync(src, 'utf-8')).reqId } };
+    } catch { return null; }
+}
+// 读取请求独立 frame
+function getRequestFrame(requestId) {
+    try {
+        return { headers: { req_id: JSON.parse(readFileSync(getFramePath(requestId), 'utf-8')).reqId } };
+    } catch { return null; }
+}
+// 清理请求 frame
+function clearRequestFrame(requestId) {
+    try { unlinkSync(getFramePath(requestId)); } catch { /* ignore */ }
+}
 /**
  * 创建企业微信消息发送器
  */
@@ -268,35 +300,56 @@ export function createWecomSender(wsClient) {
             pendingStreamUpdate = null;
         },
         async sendPermissionCard(chatId, requestId, toolName, toolInput) {
-            const inputSummary = buildInputSummary(toolName, toolInput);
-            // 如果内容较长（含 diff 等），先发一条文本消息展示详情
-            if (inputSummary.length > 80) {
-                try {
-                    const client = getWSClient();
-                    await client.sendMessage(chatId, {
-                        msgtype: 'markdown',
-                        markdown: { content: `🔐 **${toolName}** 请求确认:\n\n${inputSummary.slice(0, 1000)}` },
-                    });
-                } catch (err) {
-                    log.warn('Failed to send permission diff preview:', err);
+            log.info(`sendPermissionCard: tool=${toolName}, requestId=${requestId}`);
+            const isChannelMode = toolInput?.request_id && toolInput?.tool_name;
+            // 解析工具详情
+            let fullDetail;
+            let subtitleText;
+            if (isChannelMode) {
+                // 优先使用 hook 预格式化的 preview（带 diff 格式），
+                // 回退到 input_preview 原始 JSON 解析
+                const preview = toolInput._inputPreview || toolInput.input_preview || '';
+                const desc = toolInput.description || '';
+                let formattedPreview = preview;
+
+                // ✅ 调试日志
+                log.info(`[DEBUG] isChannelMode=true, _inputPreview len=${toolInput._inputPreview?.length || 0}, input_preview len=${toolInput.input_preview?.length || 0}, preview len=${preview.length}`);
+
+                if (!toolInput._inputPreview && preview.startsWith('{')) {
+                    try {
+                        const p = JSON.parse(preview);
+                        if (p.old_string != null && p.new_string != null) {
+                            const parts = [];
+                            if (p.file_path) parts.push(`file: ${p.file_path}`);
+                            if (p.old_string) parts.push(...String(p.old_string).split('\n').map(l => `- ${l}`));
+                            if (p.new_string) parts.push(...String(p.new_string).split('\n').map(l => `+ ${l}`));
+                            formattedPreview = parts.join('\n');
+                        } else {
+                            formattedPreview = Object.entries(p).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+                        }
+                    } catch { /* ignore */ }
                 }
+                fullDetail = formattedPreview || desc;
+
+                // ✅ 调试日志
+                log.info(`[DEBUG] formattedPreview len=${formattedPreview.length}, fullDetail len=${fullDetail.length}, desc len=${desc.length}`);
+                // 卡片副标题只显示摘要（纯文本，企业微信会截断长文本）
+                // 全文在 step A 的 markdown 详情消息里展示
+                const firstLines = (formattedPreview || desc).split('\n').slice(0, 3);
+                subtitleText = firstLines.join(' | ').slice(0, 120);
+            } else {
+                // ✅ 优先使用 _inputPreview（Hook 格式化的完整 diff），fallback 到 buildInputSummary
+                fullDetail = toolInput._inputPreview || buildInputSummary(toolName, toolInput);
+                subtitleText = fullDetail.split('\n')[0].slice(0, 80);
             }
-            // 权限卡片只放简短摘要 + 按钮
-            const shortSummary = inputSummary.split('\n')[0].slice(0, 80);
-            // 动态按钮
+            // 按钮
             let buttonList;
             if (Array.isArray(toolInput?._buttons) && toolInput._buttons.length > 0) {
                 buttonList = toolInput._buttons.map(b => ({
-                    text: b.text,
-                    style: b.style ?? 1,
-                    key: b.key ?? `perm_allow_${requestId}`,
+                    text: b.text, style: b.style ?? 1, key: b.key ?? `perm_allow_${requestId}`,
                 }));
             } else {
-                const actionMap = {
-                    Bash: '执行', Edit: '修改', Write: '写入',
-                    Read: '读取', Grep: '搜索', Glob: '搜索',
-                    WebFetch: '访问', WebSearch: '搜索',
-                };
+                const actionMap = { Bash: '执行', Edit: '修改', Write: '写入', Read: '读取', Grep: '搜索', Glob: '搜索', WebFetch: '访问', WebSearch: '搜索' };
                 const action = actionMap[toolName] || '操作';
                 buttonList = [
                     { text: `允许${action}`, style: 1, key: `perm_allow_${requestId}` },
@@ -304,20 +357,51 @@ export function createWecomSender(wsClient) {
                     { text: '拒绝', style: 3, key: `perm_deny_${requestId}` },
                 ];
             }
-            const title = toolInput?._title || `🔐 ${toolName} - 请求确认`;
+            let title;
+            if (isChannelMode) {
+                title = `🔐 ${(toolInput.tool_name || toolName).replace(/^mcp__[^_]+__/, '')} - 请求确认`;
+            } else {
+                title = toolInput?._title || `🔐 ${toolName} - 请求确认`;
+            }
+            // step A: sendMessage 发送完整格式化详情
+            // replyStream(msgtype:'stream') 要求活跃回调上下文，forkFrame 的 req_id 已被消费。
+            // sendMessage(aibot_send_msg cmd) 可独立推送 markdown，无需回调。
+            // ✅ 修改：移除 isChannelMode 限制，支持 Hook 模式下的工具（如 Edit）也发送 frame
+            // ✅ 添加工具白名单：只对需要详细展示的工具发送 frame，避免消息轰炸
+            const TOOLS_NEED_FRAME = ['Edit', 'Write', 'Bash', 'Agent'];
+            if (fullDetail && TOOLS_NEED_FRAME.includes(toolName)) {
+                try {
+                    // ✅ 字符限制处理：企业微信 markdown 消息有长度限制
+                    const MAX_LENGTH = 3500; // 留 500 字符给模板文本
+                    const truncatedDetail = fullDetail.length > MAX_LENGTH
+                        ? fullDetail.slice(0, MAX_LENGTH) + '\n\n... (内容已截断，完整内容请查看终端)'
+                        : fullDetail;
+
+                    await wsClient.sendMessage(chatId, {
+                        msgtype: 'markdown',
+                        markdown: { content: `🔐 **${toolName}** 请求确认\n\n\`\`\`\n${truncatedDetail}\n\`\`\`` },
+                    });
+                    log.info(`Permission detail sent: ${toolName} (${fullDetail.length} chars)`);
+                } catch (err) {
+                    log.warn(`Permission detail failed: ${err.message}`);
+                    // ✅ 降级：frame 失败时，将详情合并到按钮卡片
+                    subtitleText = fullDetail.slice(0, 256);
+                }
+            }
+            // step B: template_card 带按钮
             try {
                 await wsClient.sendMessage(chatId, {
                     msgtype: 'template_card',
                     template_card: {
                         card_type: 'button_interaction',
                         main_title: { title },
-                        sub_title_text: shortSummary,
+                        sub_title_text: subtitleText,
                         task_id: `perm_${requestId}`,
                         button_list: buttonList,
                     },
                 });
-            }
-            catch (err) {
+                log.info(`Permission card sent: ${toolName}`);
+            } catch (err) {
                 log.error('Failed to send permission card:', err);
             }
             return '';

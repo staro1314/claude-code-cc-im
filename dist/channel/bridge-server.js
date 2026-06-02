@@ -35,6 +35,8 @@ const log = createLogger('Bridge');
 export async function startBridgeServer({ port, sendTextReply, sendPermissionCard, resolvePermission }) {
   // Track the last active chat_id for permission relay
   let lastChatId = '';
+  // 缓存 hook 推送的工具通知全文，供权限卡片使用（MCP 通知的 input_preview 是截断的）
+  const toolNotificationCache = new Map(); // chatId → { text, ts }
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -81,7 +83,75 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
           const { request_id, tool_name, description, input_preview } = body;
           const chatId = body.chat_id || lastChatId;
           log.info(`Permission relay: ${tool_name} (${request_id}) → chat=${chatId}`);
+          log.info(`  description: ${(description || '').slice(0, 150)}`);
+          log.info(`  input_preview len=${input_preview ? input_preview.length : 0}`);
           if (chatId) {
+            // 优先从缓存取 hook 推送的工具通知全文（含完整 diff）
+            const cacheKey = `${chatId}:${tool_name}`;
+            const cached = toolNotificationCache.get(cacheKey);
+            if (cached && Date.now() - cached.ts < 30000) {
+              body._inputPreview = cached.text.replace(/^[^\n]*?→\s*/, '');
+              toolNotificationCache.delete(cacheKey);
+              log.info(`Using cached notification for ${cacheKey}: len=${body._inputPreview.length}, has_plus=${body._inputPreview.includes('+')}, preview=${body._inputPreview.slice(0, 200)}`);
+            } else {
+              log.info(`No cache hit for ${cacheKey}: cached=${!!cached}, age=${cached ? Date.now() - cached.ts : 'N/A'}ms`);
+            }
+            // 回退：从截断 JSON 提取可读信息
+            if (!body._inputPreview && input_preview && input_preview.startsWith('{')) {
+              try {
+                const p = JSON.parse(input_preview);
+                if (p.old_string != null && p.new_string != null) {
+                  const parts = [];
+                  if (p.file_path) parts.push(p.file_path);
+                  parts.push(...String(p.old_string).split('\n').map(l => `- ${l}`));
+                  parts.push(...String(p.new_string).split('\n').map(l => `+ ${l}`));
+                  body._inputPreview = parts.join('\n');
+                } else if (p.command) {
+                  body._inputPreview = `Bash → ${String(p.command).slice(0, 120)}`;
+                }
+              } catch {
+                // 截断 JSON：字符串定位提取（不依赖正则，避免引号内转义干扰）
+                const extract = (key) => {
+                  const marker = `"${key}":"`;
+                  const idx = input_preview.indexOf(marker);
+                  if (idx < 0) return '';
+                  const start = idx + marker.length;
+                  // 提取到 JSON 字符串结束位置（引号或逗号或大括号）
+                  let end = start;
+                  let escaped = false;
+                  while (end < input_preview.length) {
+                    const ch = input_preview[end];
+                    if (escaped) {
+                      escaped = false;
+                    } else if (ch === '\\') {
+                      escaped = true;
+                    } else if (ch === '"') {
+                      break;
+                    }
+                    end++;
+                  }
+                  return input_preview.slice(start, end)
+                    .replace(/\\n/g, '\n').replace(/\\\\/g, '\\').replace(/\\"/g, '"').trim();
+                };
+                const fpM = input_preview.match(/"file_path"\s*:\s*"([^"]+)"/);
+                const fp = fpM ? fpM[1].replace(/\\\\/g, '\\').replace(/.*[/\\]/, '') : '';
+                const os = extract('old_string');
+                const ns = extract('new_string');
+                log.info(`[DEBUG] extract: fp="${fp}", os len=${os.length}, ns len=${ns.length}`);
+                log.info(`[DEBUG] extract os="${os.slice(0, 80)}"`);
+                log.info(`[DEBUG] extract ns="${ns.slice(0, 80)}"`);
+                if (os || ns) {
+                  const parts = [];
+                  if (fp) parts.push(`📝 ${fp}`);
+                  if (os) parts.push(...os.split('\n').filter(Boolean).map(l => `- ${l}`));
+                  if (ns) parts.push(...ns.split('\n').filter(Boolean).map(l => `+ ${l}`));
+                  body._inputPreview = parts.join('\n');
+                  log.info(`[DEBUG] body._inputPreview="${body._inputPreview.slice(0, 100)}"`);
+                } else if (fp) {
+                  body._inputPreview = `📝 ${fp}`;
+                }
+              }
+            }
             await sendPermissionCard(chatId, request_id, tool_name, body);
             log.info(`Permission card sent to chat=${chatId}`);
           } else {
@@ -140,6 +210,13 @@ export async function startBridgeServer({ port, sendTextReply, sendPermissionCar
 
           // 所有其他事件：直接发送文本
           log.debug(`Tool event → chat=${chatId}: ${tool_name}`);
+          // 缓存需要权限的工具通知全文（Edit/Bash/Write 等），供权限卡片使用
+          // 只缓存包含 diff 或命令详情的长通知，排除 thinking/text 等短通知
+          const permissionTools = ['Edit', 'Bash', 'Write', 'WebFetch', 'WebSearch', 'Agent'];
+          if (notification && permissionTools.includes(tool_name) && notification.length > 80) {
+            toolNotificationCache.set(`${chatId}:${tool_name}`, { text: notification, ts: Date.now() });
+            log.debug(`Cached tool notification for ${chatId}:${tool_name}: len=${notification.length}`);
+          }
           await sendTextReply(chatId, notification);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));

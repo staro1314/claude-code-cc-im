@@ -123,7 +123,7 @@ async function handleRequest(req, res) {
                 sendJson(res, 400, { error: 'Request body must be a JSON object' });
                 return;
             }
-            const { chatId, toolName, toolInput, threadRootMsgId, threadId, platform } = body;
+            const { chatId, toolName, toolInput, inputPreview, threadRootMsgId, threadId, platform } = body;
             if (typeof chatId !== 'string' || !chatId) {
                 sendJson(res, 400, { error: 'chatId must be a non-empty string' });
                 return;
@@ -174,7 +174,9 @@ async function handleRequest(req, res) {
                     resolved = true;
                     resolve(decision);
                 };
-                platformSender.sendPermissionCard(chatId, id, toolName, toolInput ?? {}, threadCtx).then((messageId) => {
+                const enrichedInput = { ...(toolInput ?? {}) };
+                if (inputPreview) enrichedInput._inputPreview = inputPreview;
+                platformSender.sendPermissionCard(chatId, id, toolName, enrichedInput, threadCtx).then((messageId) => {
                     // 超时定时器在卡片发送成功后才启动，确保用户有完整的决策时间
                     const timeout = setTimeout(() => {
                         if (pendingRequests.has(id)) {

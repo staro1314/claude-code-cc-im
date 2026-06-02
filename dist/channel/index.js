@@ -64,12 +64,12 @@ export async function runChannel() {
         port: bridgePort,
         sendTextReply: async (chatId, text) => {
             // Dynamically import to avoid circular deps
-            const { sendTextReply } = await import('../wecom/message-sender.js');
+            const { sendTextReply } = await import(`../wecom/message-sender.js?t=${Date.now()}`);
             await sendTextReply(chatId, text);
         },
         sendPermissionCard: async (chatId, requestId, toolName, toolInput) => {
-            // Dynamically import to avoid circular deps
-            const { createWecomSender } = await import('../wecom/message-sender.js');
+            // Dynamically import to avoid circular deps (加时间戳破坏缓存)
+            const { createWecomSender } = await import(`../wecom/message-sender.js?t=${Date.now()}`);
             if (wecomWsClient) {
                 const sender = createWecomSender(wecomWsClient);
                 await sender.sendPermissionCard(chatId, requestId, toolName, toolInput);
